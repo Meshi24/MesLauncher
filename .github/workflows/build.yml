@@ -8,10 +8,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Unzip project
-        run: |
-          unzip -o SimpleLauncher.zip -d project
-          sed -i 's/Simple Launcher/MesLauncher/' project/app/src/main/AndroidManifest.xml
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -20,9 +16,8 @@ jobs:
         with:
           gradle-version: "8.9"
       - name: Build debug APK
-        working-directory: project
         run: gradle assembleDebug --stacktrace
       - uses: actions/upload-artifact@v4
         with:
           name: MesLauncher-apk
-          path: project/app/build/outputs/apk/debug/app-debug.apk
+          path: app/build/outputs/apk/debug/app-debug.apk
