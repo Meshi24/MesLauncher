@@ -16,7 +16,7 @@ class TouchFrame(ctx: Context, private val watcher: (MotionEvent) -> Unit) : Fra
     }
 }
 
-/** Grid home: kolom x baris, tiap anak punya posisi (col,row). */
+/** Grid home: kolom x baris, tiap anak punya posisi (col,row) dan ukuran (w,h) dalam kotak. */
 class HomeGrid(ctx: Context) : ViewGroup(ctx) {
     var cols = 4
     var rows = 6
@@ -27,13 +27,16 @@ class HomeGrid(ctx: Context) : ViewGroup(ctx) {
             invalidate()
         }
 
-    class LP(val col: Int, val row: Int) : ViewGroup.LayoutParams(0, 0)
+    class LP(val col: Int, val row: Int, val w: Int = 1, val h: Int = 1) :
+        ViewGroup.LayoutParams(0, 0)
 
     private val hintPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0x33FFFFFF }
 
     init {
         setWillNotDraw(false)
     }
+
+    private fun inset(lp: LP): Int = if (lp.w > 1 || lp.h > 1) context.dp(6) else 0
 
     override fun onMeasure(w: Int, h: Int) {
         val ww = View.MeasureSpec.getSize(w)
@@ -42,9 +45,12 @@ class HomeGrid(ctx: Context) : ViewGroup(ctx) {
         val cw = ww / cols
         val ch = hh / rows
         for (i in 0 until childCount) {
-            getChildAt(i).measure(
-                View.MeasureSpec.makeMeasureSpec(cw, View.MeasureSpec.EXACTLY),
-                View.MeasureSpec.makeMeasureSpec(ch, View.MeasureSpec.EXACTLY)
+            val child = getChildAt(i)
+            val lp = child.layoutParams as LP
+            val ins = inset(lp)
+            child.measure(
+                View.MeasureSpec.makeMeasureSpec((cw * lp.w - 2 * ins).coerceAtLeast(0), View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec((ch * lp.h - 2 * ins).coerceAtLeast(0), View.MeasureSpec.EXACTLY)
             )
         }
     }
@@ -55,14 +61,20 @@ class HomeGrid(ctx: Context) : ViewGroup(ctx) {
         for (i in 0 until childCount) {
             val child = getChildAt(i)
             val lp = child.layoutParams as LP
-            child.layout(lp.col * cw, lp.row * ch, (lp.col + 1) * cw, (lp.row + 1) * ch)
+            val ins = inset(lp)
+            child.layout(
+                lp.col * cw + ins,
+                lp.row * ch + ins,
+                (lp.col + lp.w) * cw - ins,
+                (lp.row + lp.h) * ch - ins
+            )
         }
     }
 
     private fun occupied(c: Int, r: Int): Boolean {
         for (i in 0 until childCount) {
             val lp = getChildAt(i).layoutParams as LP
-            if (lp.col == c && lp.row == r) return true
+            if (c >= lp.col && c < lp.col + lp.w && r >= lp.row && r < lp.row + lp.h) return true
         }
         return false
     }
