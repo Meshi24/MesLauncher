@@ -32,6 +32,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.widget.doAfterTextChanged
 import androidx.recyclerview.widget.GridLayoutManager
@@ -43,12 +44,14 @@ class HomeActivity : Activity() {
 
     private val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
     private val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
+    private val sizes = listOf(1 to 1, 2 to 1, 1 to 2, 2 to 2)
 
     private var allApps: List<App> = emptyList()
 
     private lateinit var root: TouchFrame
     private lateinit var homeLayer: FrameLayout
     private lateinit var homeGrid: HomeGrid
+    private lateinit var bottomBar: LinearLayout
     private lateinit var dockBar: LinearLayout
     private lateinit var pill: TextView
     private lateinit var drawerLayer: FrameLayout
@@ -62,8 +65,11 @@ class HomeActivity : Activity() {
     private var drawerScroll: View? = null
     private var overlay: View? = null
     private var overlayScroll: View? = null
+    private var homeFolder: View? = null
     private var pendingKey: String? = null
     private var pendingOrig: Placed? = null
+    private var pendW = 1
+    private var pendH = 1
     private var firstResume = true
 
     private var downX = 0f
@@ -79,12 +85,16 @@ class HomeActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.isNavigationBarContrastEnforced = false
+
         root = TouchFrame(this) { ev -> onSwipe(ev) }
         buildHome()
         buildDrawer()
         root.addView(homeLayer, FrameLayout.LayoutParams(MATCH, MATCH))
         root.addView(drawerLayer, FrameLayout.LayoutParams(MATCH, MATCH))
         setContentView(root)
+        applyInsets()
 
         ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
             val b = insets.getInsets(WindowInsetsCompat.Type.systemBars())
@@ -124,22 +134,27 @@ class HomeActivity : Activity() {
         homeGrid.setOnLongClickListener { showHomeMenu(); true }
         homeLayer.addView(homeGrid, FrameLayout.LayoutParams(MATCH, MATCH))
 
+        bottomBar = LinearLayout(this)
+        bottomBar.orientation = LinearLayout.VERTICAL
+        bottomBar.gravity = Gravity.CENTER_HORIZONTAL
+
         pill = TextView(this)
         pill.text = "Cari app"
         pill.textSize = 13f
         pill.gravity = Gravity.CENTER
         pill.setPadding(dp(22), 0, dp(22), 0)
         pill.setOnClickListener { openDrawer(true) }
-        homeLayer.addView(
-            pill,
-            FrameLayout.LayoutParams(WRAP, dp(32), Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL)
-        )
+        val plp = LinearLayout.LayoutParams(WRAP, dp(32))
+        plp.bottomMargin = dp(8)
+        bottomBar.addView(pill, plp)
 
         dockBar = LinearLayout(this)
         dockBar.orientation = LinearLayout.HORIZONTAL
         dockBar.gravity = Gravity.CENTER_VERTICAL
         dockBar.setPadding(dp(10), 0, dp(10), 0)
-        homeLayer.addView(dockBar, FrameLayout.LayoutParams(MATCH, dp(84), Gravity.BOTTOM))
+        bottomBar.addView(dockBar, LinearLayout.LayoutParams(MATCH, dp(84)))
+
+        homeLayer.addView(bottomBar, FrameLayout.LayoutParams(MATCH, WRAP, Gravity.BOTTOM))
     }
 
     private fun buildDrawer() {
@@ -169,18 +184,12 @@ class HomeActivity : Activity() {
 
     private fun applyInsets() {
         lp(homeGrid).topMargin = insTop + dp(8)
-        lp(homeGrid).bottomMargin = insBottom + dp(150)
-        lp(dockBar).apply {
-            marginStart = dp(12)
-            marginEnd = dp(12)
-            bottomMargin = insBottom + dp(10)
-        }
-        lp(pill).bottomMargin = insBottom + dp(10 + 84 + 8)
+        lp(homeGrid).bottomMargin = insBottom + dp(146)
+        bottomBar.setPadding(dp(12), 0, dp(12), insBottom + dp(10))
         lp(searchBox).topMargin = insTop + dp(12)
         lp(drawerContent).topMargin = insTop + dp(68)
         homeGrid.requestLayout()
-        dockBar.requestLayout()
-        pill.requestLayout()
+        bottomBar.requestLayout()
         searchBox.requestLayout()
         drawerContent.requestLayout()
         if (allApps.isNotEmpty()) renderDrawer()
@@ -234,17 +243,49 @@ class HomeActivity : Activity() {
     private fun renderHome() {
         homeGrid.removeAllViews()
         val cols = homeGrid.cols
+        val rows = homeGrid.rows
+        val folders = Prefs.folders(this)
         val lc = if (lightWp) 0xFF111111.toInt() else Color.WHITE
+        val light = dockLight()
+        val cardColor = if (light) 0x66FFFFFF else 0x66000000
+        val cardText = if (light) 0xFF111111.toInt() else Color.WHITE
+
         for (p in Prefs.home(this)) {
-            if (p.col >= cols || p.row >= homeGrid.rows) continue
+            if (p.col >= cols || p.row >= rows) continue
+            val w = minOf(p.w, cols - p.col)
+            val h = minOf(p.h, rows - p.row)
+
+            if (p.key.startsWith("folder:")) {
+                val f = folders.firstOrNull { "folder:" + it.id == p.key } ?: continue
+                val apps = f.keys.mapNotNull { k -> allApps.firstOrNull { it.key == k } }
+                val v = FolderView(this, f.name, apps, w, h, cardColor, cardText)
+                v.layoutParams = HomeGrid.LP(p.col, p.row, w, h)
+                v.setOnClickListener { openHomeFolder(f, apps) }
+                v.setOnLongClickListener { folderMenu(f); true }
+                v.pressSpring()
+                homeGrid.addView(v)
+                continue
+            }
+
             val app = allApps.firstOrNull { it.key == p.key } ?: continue
-            val cell = IconCell(this, lc, true, cols <= 6)
-            cell.bind(app)
-            cell.layoutParams = HomeGrid.LP(p.col, p.row)
-            cell.setOnClickListener { launchApp(app, cell.icon) }
-            cell.setOnLongClickListener { homeAppMenu(app); true }
-            cell.pressSpring()
-            homeGrid.addView(cell)
+            if (w == 1 && h == 1) {
+                val cell = IconCell(this, lc, true, cols <= 6)
+                cell.bind(app)
+                cell.layoutParams = HomeGrid.LP(p.col, p.row, 1, 1)
+                cell.setOnClickListener { launchApp(app, cell.icon) }
+                cell.setOnLongClickListener { homeAppMenu(app); true }
+                cell.pressSpring()
+                homeGrid.addView(cell)
+            } else {
+                val big = BigAppView(this, w >= 2 && h == 1, cardText, cardColor)
+                big.icon.setImageDrawable(app.iconCopy())
+                big.label.text = app.label
+                big.layoutParams = HomeGrid.LP(p.col, p.row, w, h)
+                big.setOnClickListener { launchApp(app, big.icon) }
+                big.setOnLongClickListener { homeAppMenu(app); true }
+                big.pressSpring()
+                homeGrid.addView(big)
+            }
         }
         homeGrid.requestLayout()
         homeGrid.invalidate()
@@ -278,21 +319,37 @@ class HomeActivity : Activity() {
 
     // ------------------------------------------------------- home actions
 
-    private fun startPlace(key: String) {
+    private fun fits(list: List<Placed>, c: Int, r: Int, w: Int, h: Int): Boolean =
+        list.none { c < it.col + it.w && it.col < c + w && r < it.row + it.h && it.row < r + h }
+
+    private fun startPlace(key: String, defW: Int = 1, defH: Int = 1) {
         val cur = Prefs.home(this)
-        pendingOrig = cur.firstOrNull { it.key == key }
+        val orig = cur.firstOrNull { it.key == key }
+        pendingOrig = orig
+        pendW = orig?.w ?: defW
+        pendH = orig?.h ?: defH
         Prefs.saveHome(this, cur.filter { it.key != key })
         pendingKey = key
         renderHome()
         closeDrawer(true)
         homeGrid.moving = true
-        Toast.makeText(this, "Tap kotak kosong buat naruh ikon", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "Tap kotak kosong buat naruh", Toast.LENGTH_SHORT).show()
     }
 
     private fun placePending(c: Int, r: Int) {
         val key = pendingKey ?: return
-        if (Prefs.home(this).any { it.col == c && it.row == r }) return
-        Prefs.saveHome(this, Prefs.home(this) + Placed(key, c, r))
+        val cols = homeGrid.cols
+        val rows = homeGrid.rows
+        val w = minOf(pendW, cols)
+        val h = minOf(pendH, rows)
+        val cc = minOf(c, cols - w)
+        val rr = minOf(r, rows - h)
+        val cur = Prefs.home(this)
+        if (!fits(cur, cc, rr, w, h)) {
+            Toast.makeText(this, "Nggak muat di situ, pilih tempat lain", Toast.LENGTH_SHORT).show()
+            return
+        }
+        Prefs.saveHome(this, cur + Placed(key, cc, rr, w, h))
         endMove()
         renderHome()
     }
@@ -305,21 +362,55 @@ class HomeActivity : Activity() {
 
     private fun cancelMove() {
         val o = pendingOrig
-        if (o != null) Prefs.saveHome(this, Prefs.home(this) + o)
+        val k = pendingKey
+        if (o != null) {
+            Prefs.saveHome(this, Prefs.home(this) + o)
+        } else if (k != null && k.startsWith("folder:")) {
+            val id = k.removePrefix("folder:")
+            Prefs.saveFolders(this, Prefs.folders(this).filter { it.id != id })
+        }
         endMove()
         renderHome()
     }
 
+    private fun resizeItem(key: String, w0: Int, h0: Int) {
+        val cur = Prefs.home(this)
+        val item = cur.firstOrNull { it.key == key } ?: return
+        val w = minOf(w0, homeGrid.cols)
+        val h = minOf(h0, homeGrid.rows)
+        val c = minOf(item.col, homeGrid.cols - w)
+        val r = minOf(item.row, homeGrid.rows - h)
+        val others = cur.filter { it.key != key }
+        if (!fits(others, c, r, w, h)) {
+            Toast.makeText(
+                this,
+                "Nggak muat. Kosongin tempat di sebelahnya atau pindahin dulu",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+        Prefs.saveHome(this, others + Placed(key, c, r, w, h))
+        renderHome()
+    }
+
+    private fun sizeDialog(key: String) {
+        AlertDialog.Builder(this).setTitle("Ukuran (lebar x tinggi)")
+            .setItems(arrayOf("1x1  normal", "2x1  lebar", "1x2  tinggi", "2x2  besar")) { _, i ->
+                resizeItem(key, sizes[i].first, sizes[i].second)
+            }.show()
+    }
+
     private fun homeAppMenu(app: App) {
         AlertDialog.Builder(this).setTitle(app.label)
-            .setItems(arrayOf("Pindah", "Hapus dari home", "Info app")) { _, w ->
-                when (w) {
-                    0 -> startPlace(app.key)
-                    1 -> {
+            .setItems(arrayOf("Ukuran", "Pindah", "Hapus dari home", "Info app")) { _, which ->
+                when (which) {
+                    0 -> sizeDialog(app.key)
+                    1 -> startPlace(app.key)
+                    2 -> {
                         Prefs.saveHome(this, Prefs.home(this).filter { it.key != app.key })
                         renderHome()
                     }
-                    2 -> openInfo(app.pkg)
+                    3 -> openInfo(app.pkg)
                     else -> {}
                 }
             }.show()
@@ -327,8 +418,8 @@ class HomeActivity : Activity() {
 
     private fun dockMenu(app: App) {
         AlertDialog.Builder(this).setTitle(app.label)
-            .setItems(arrayOf("Hapus dari dock", "Info app")) { _, w ->
-                when (w) {
+            .setItems(arrayOf("Hapus dari dock", "Info app")) { _, which ->
+                when (which) {
                     0 -> {
                         Prefs.saveDock(this, Prefs.dock(this).filter { it != app.key })
                         renderDock()
@@ -356,18 +447,21 @@ class HomeActivity : Activity() {
 
     private fun showHomeMenu() {
         AlertDialog.Builder(this)
-            .setItems(arrayOf("Setelan launcher", "Ganti wallpaper")) { _, w ->
-                if (w == 0) {
-                    startActivity(Intent(this, SettingsActivity::class.java))
-                } else {
-                    try {
-                        startActivity(
-                            Intent.createChooser(
-                                Intent(Intent.ACTION_SET_WALLPAPER), "Ganti wallpaper"
+            .setItems(arrayOf("Buat folder", "Setelan launcher", "Ganti wallpaper")) { _, which ->
+                when (which) {
+                    0 -> createFolder()
+                    1 -> startActivity(Intent(this, SettingsActivity::class.java))
+                    2 -> {
+                        try {
+                            startActivity(
+                                Intent.createChooser(
+                                    Intent(Intent.ACTION_SET_WALLPAPER), "Ganti wallpaper"
+                                )
                             )
-                        )
-                    } catch (e: ActivityNotFoundException) {
+                        } catch (e: ActivityNotFoundException) {
+                        }
                     }
+                    else -> {}
                 }
             }.show()
     }
@@ -384,12 +478,15 @@ class HomeActivity : Activity() {
 
     private fun appMenu(app: App) {
         AlertDialog.Builder(this).setTitle(app.label)
-            .setItems(arrayOf("Tambah ke home", "Tambah ke dock", "Info app", "Uninstall")) { _, w ->
-                when (w) {
+            .setItems(
+                arrayOf("Tambah ke home", "Tambah ke dock", "Tambah ke folder", "Info app", "Uninstall")
+            ) { _, which ->
+                when (which) {
                     0 -> startPlace(app.key)
                     1 -> addToDock(app)
-                    2 -> openInfo(app.pkg)
-                    3 -> uninstall(app.pkg)
+                    2 -> addToFolder(app)
+                    3 -> openInfo(app.pkg)
+                    4 -> uninstall(app.pkg)
                     else -> {}
                 }
             }.show()
@@ -409,6 +506,179 @@ class HomeActivity : Activity() {
         }
     }
 
+    // ------------------------------------------------------------- folders
+
+    private fun cleanName(s: String): String =
+        s.replace("|", " ").replace(",", " ").replace("\n", " ").trim().ifBlank { "Folder" }
+
+    private fun pickApps(title: String, selected: List<String>, onDone: (List<String>) -> Unit) {
+        val apps = allApps
+        if (apps.isEmpty()) {
+            Toast.makeText(this, "Daftar app belum kebaca", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val checked = BooleanArray(apps.size) { selected.contains(apps[it].key) }
+        AlertDialog.Builder(this).setTitle(title)
+            .setMultiChoiceItems(Array(apps.size) { apps[it].label }, checked) { _, i, b ->
+                checked[i] = b
+            }
+            .setPositiveButton("Simpan") { _, _ ->
+                onDone(apps.indices.filter { checked[it] }.map { apps[it].key })
+            }
+            .setNegativeButton("Batal", null)
+            .show()
+    }
+
+    private fun createFolder() {
+        val input = EditText(this)
+        input.setText("Folder")
+        input.setSelectAllOnFocus(true)
+        AlertDialog.Builder(this).setTitle("Nama folder").setView(input)
+            .setPositiveButton("Lanjut") { _, _ ->
+                val name = cleanName(input.text.toString())
+                pickApps("Isi folder", emptyList()) { keys ->
+                    val id = System.currentTimeMillis().toString()
+                    Prefs.saveFolders(this, Prefs.folders(this) + Folder(id, name, keys))
+                    startPlace("folder:$id", 2, 2)
+                }
+            }
+            .setNegativeButton("Batal", null)
+            .show()
+    }
+
+    private fun saveFolder(f: Folder) {
+        Prefs.saveFolders(this, Prefs.folders(this).map { if (it.id == f.id) f else it })
+        renderHome()
+    }
+
+    private fun deleteFolder(f: Folder) {
+        Prefs.saveFolders(this, Prefs.folders(this).filter { it.id != f.id })
+        Prefs.saveHome(this, Prefs.home(this).filter { it.key != "folder:" + f.id })
+        renderHome()
+    }
+
+    private fun renameFolder(f: Folder) {
+        val input = EditText(this)
+        input.setText(f.name)
+        input.setSelectAllOnFocus(true)
+        AlertDialog.Builder(this).setTitle("Ganti nama").setView(input)
+            .setPositiveButton("Simpan") { _, _ ->
+                saveFolder(f.copy(name = cleanName(input.text.toString())))
+            }
+            .setNegativeButton("Batal", null)
+            .show()
+    }
+
+    private fun folderMenu(f: Folder) {
+        val key = "folder:" + f.id
+        AlertDialog.Builder(this).setTitle(f.name)
+            .setItems(arrayOf("Ukuran", "Ubah isi", "Ganti nama", "Pindah", "Hapus folder")) { _, which ->
+                when (which) {
+                    0 -> sizeDialog(key)
+                    1 -> pickApps("Isi folder", f.keys) { keys -> saveFolder(f.copy(keys = keys)) }
+                    2 -> renameFolder(f)
+                    3 -> startPlace(key, 2, 2)
+                    4 -> deleteFolder(f)
+                    else -> {}
+                }
+            }.show()
+    }
+
+    private fun addToFolder(app: App) {
+        val fs = Prefs.folders(this)
+        if (fs.isEmpty()) {
+            Toast.makeText(
+                this,
+                "Belum ada folder. Tahan lama area kosong di home, pilih Buat folder",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+        AlertDialog.Builder(this).setTitle("Pilih folder")
+            .setItems(fs.map { it.name }.toTypedArray()) { _, i ->
+                val f = fs[i]
+                if (!f.keys.contains(app.key)) saveFolder(f.copy(keys = f.keys + app.key))
+                Toast.makeText(this, "Ditambah ke " + f.name, Toast.LENGTH_SHORT).show()
+            }.show()
+    }
+
+    private fun folderAppMenu(f: Folder, app: App) {
+        AlertDialog.Builder(this).setTitle(app.label)
+            .setItems(arrayOf("Hapus dari folder", "Info app")) { _, which ->
+                when (which) {
+                    0 -> {
+                        closeHomeFolder()
+                        saveFolder(f.copy(keys = f.keys - app.key))
+                    }
+                    1 -> openInfo(app.pkg)
+                    else -> {}
+                }
+            }.show()
+    }
+
+    private fun openHomeFolder(f: Folder, apps: List<App>) {
+        closeHomeFolder()
+        val dm = resources.displayMetrics
+
+        val scrim = FrameLayout(this)
+        scrim.setBackgroundColor(0x99000000.toInt())
+        scrim.setOnClickListener { closeHomeFolder() }
+
+        val card = LinearLayout(this)
+        card.orientation = LinearLayout.VERTICAL
+        card.background = rounded(0xF0202024.toInt(), dp(28).toFloat())
+        card.setPadding(dp(12), dp(14), dp(12), dp(12))
+        card.isClickable = true
+
+        val title = TextView(this)
+        title.text = f.name
+        title.setTextColor(Color.WHITE)
+        title.textSize = 16f
+        title.setTypeface(null, Typeface.BOLD)
+        title.gravity = Gravity.CENTER
+        card.addView(title, LinearLayout.LayoutParams(MATCH, WRAP))
+
+        if (apps.isEmpty()) {
+            val empty = TextView(this)
+            empty.text = "Folder kosong. Tahan lama folder, lalu pilih Ubah isi"
+            empty.setTextColor(0xFFBBBBBB.toInt())
+            empty.textSize = 13f
+            empty.gravity = Gravity.CENTER
+            empty.setPadding(dp(8), dp(16), dp(8), dp(16))
+            card.addView(empty, LinearLayout.LayoutParams(MATCH, WRAP))
+        } else {
+            val rv = RecyclerView(this)
+            rv.layoutManager = GridLayoutManager(this, 4)
+            rv.overScrollMode = View.OVER_SCROLL_NEVER
+            val ad = GridAdapter(
+                { a, v ->
+                    launchApp(a, v)
+                    closeHomeFolder()
+                },
+                { a -> folderAppMenu(f, a) }
+            )
+            rv.adapter = ad
+            ad.submit(apps)
+            val rowsNeeded = ((apps.size + 3) / 4).coerceAtLeast(1)
+            val hh = minOf(rowsNeeded * dp(92), (dm.heightPixels * 0.6f).toInt())
+            val rlp = LinearLayout.LayoutParams(MATCH, hh)
+            rlp.topMargin = dp(8)
+            card.addView(rv, rlp)
+        }
+
+        scrim.addView(card, FrameLayout.LayoutParams(dm.widthPixels - dp(40), WRAP, Gravity.CENTER))
+        root.addView(scrim, FrameLayout.LayoutParams(MATCH, MATCH))
+        homeFolder = scrim
+        scrim.alpha = 0f
+        scrim.animate().alpha(1f).setDuration(150).start()
+    }
+
+    private fun closeHomeFolder() {
+        val v = homeFolder
+        if (v != null) (v.parent as? ViewGroup)?.removeView(v)
+        homeFolder = null
+    }
+
     // ------------------------------------------------------- swipe + drawer
 
     private fun onSwipe(ev: MotionEvent) {
@@ -425,7 +695,7 @@ class HomeActivity : Activity() {
                 val dx = ev.rawX - downX
                 val dy = ev.rawY - downY
                 if (abs(dy) < abs(dx) * 1.5f) return
-                if (!drawerOpen && !homeGrid.moving && dy < -dp(90)) {
+                if (!drawerOpen && !homeGrid.moving && homeFolder == null && dy < -dp(90)) {
                     openDrawer(false)
                 } else if (drawerOpen && atTopOnDown && dy > dp(110)) {
                     if (overlay != null) closeOverlay() else closeDrawer(true)
@@ -610,6 +880,9 @@ class HomeActivity : Activity() {
     }
 
     private fun folderTile(name: String, apps: List<App>): View {
+        val colW = (resources.displayMetrics.widthPixels - dp(32)) / 2
+        val iconSz = maxOf(dp(40), (colW - dp(16)) / 2 - dp(10))
+
         val tile = LinearLayout(this)
         tile.orientation = LinearLayout.VERTICAL
         tile.gravity = Gravity.CENTER_HORIZONTAL
@@ -618,7 +891,7 @@ class HomeActivity : Activity() {
         val box = LinearLayout(this)
         box.orientation = LinearLayout.VERTICAL
         box.gravity = Gravity.CENTER
-        box.background = rounded(0x22FFFFFF, dp(26).toFloat())
+        box.background = rounded(0x22FFFFFF, dp(30).toFloat())
         for (r in 0..1) {
             val line = LinearLayout(this)
             line.orientation = LinearLayout.HORIZONTAL
@@ -628,8 +901,8 @@ class HomeActivity : Activity() {
                 iv.outlineProvider = roundOutline()
                 iv.clipToOutline = true
                 if (a != null) iv.setImageDrawable(a.iconCopy())
-                val ilp = LinearLayout.LayoutParams(dp(44), dp(44))
-                ilp.setMargins(dp(4), dp(4), dp(4), dp(4))
+                val ilp = LinearLayout.LayoutParams(iconSz, iconSz)
+                ilp.setMargins(dp(5), dp(5), dp(5), dp(5))
                 line.addView(iv, ilp)
             }
             box.addView(line)
@@ -639,7 +912,7 @@ class HomeActivity : Activity() {
         val label = TextView(this)
         label.text = "$name (${apps.size})"
         label.setTextColor(Color.WHITE)
-        label.textSize = 12f
+        label.textSize = 13f
         label.gravity = Gravity.CENTER
         label.maxLines = 1
         val llp = LinearLayout.LayoutParams(WRAP, WRAP)
@@ -701,6 +974,7 @@ class HomeActivity : Activity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         if (intent.action == Intent.ACTION_MAIN) {
+            closeHomeFolder()
             closeOverlay()
             if (homeGrid.moving) cancelMove()
             if (drawerOpen) closeDrawer(true)
@@ -710,6 +984,7 @@ class HomeActivity : Activity() {
     @Deprecated("Launcher stays open")
     override fun onBackPressed() {
         when {
+            homeFolder != null -> closeHomeFolder()
             overlay != null -> closeOverlay()
             homeGrid.moving -> cancelMove()
             drawerOpen -> closeDrawer(true)
