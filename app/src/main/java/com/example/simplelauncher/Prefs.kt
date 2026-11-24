@@ -3,7 +3,15 @@ package com.example.simplelauncher
 import android.app.WallpaperManager
 import android.content.Context
 
-data class Placed(val key: String, val col: Int, val row: Int, val w: Int = 1, val h: Int = 1)
+data class Placed(
+    val key: String,
+    val col: Int,
+    val row: Int,
+    val w: Int = 1,
+    val h: Int = 1,
+    val page: Int = 0
+)
+
 data class Folder(val id: String, val name: String, val keys: List<String>)
 
 fun Context.dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
@@ -26,6 +34,21 @@ object Prefs {
     fun setCols(c: Context, v: Int) = sp(c).edit().putInt("cols", v).apply()
     fun setRows(c: Context, v: Int) = sp(c).edit().putInt("rows", v).apply()
 
+    fun pages(c: Context) = sp(c).getInt("pages", 2)
+    fun setPages(c: Context, v: Int) = sp(c).edit().putInt("pages", v).apply()
+
+    fun iconScale(c: Context) = sp(c).getInt("iconScale", 100)
+    fun setIconScale(c: Context, v: Int) = sp(c).edit().putInt("iconScale", v).apply()
+
+    fun labelScale(c: Context) = sp(c).getInt("labelScale", 100)
+    fun setLabelScale(c: Context, v: Int) = sp(c).edit().putInt("labelScale", v).apply()
+
+    fun showLabels(c: Context) = sp(c).getBoolean("labels", true)
+    fun setShowLabels(c: Context, v: Boolean) = sp(c).edit().putBoolean("labels", v).apply()
+
+    fun animSpeed(c: Context) = sp(c).getInt("animSpeed", 100)
+    fun setAnimSpeed(c: Context, v: Int) = sp(c).edit().putInt("animSpeed", v).apply()
+
     fun drawerStyle(c: Context) = sp(c).getInt("drawer", 0)
     fun setDrawerStyle(c: Context, v: Int) = sp(c).edit().putInt("drawer", v).apply()
 
@@ -40,8 +63,9 @@ object Prefs {
             val row = p.getOrNull(2)?.toIntOrNull()
             val w = p.getOrNull(3)?.toIntOrNull() ?: 1
             val h = p.getOrNull(4)?.toIntOrNull() ?: 1
+            val pg = p.getOrNull(5)?.toIntOrNull() ?: 0
             if (p.size >= 3 && col != null && row != null) {
-                Placed(p[0], col, row, w.coerceAtLeast(1), h.coerceAtLeast(1))
+                Placed(p[0], col, row, w.coerceAtLeast(1), h.coerceAtLeast(1), pg.coerceAtLeast(0))
             } else null
         }
     }
@@ -49,7 +73,7 @@ object Prefs {
     fun saveHome(c: Context, l: List<Placed>) {
         sp(c).edit().putString(
             "home",
-            l.joinToString("\n") { "${it.key}|${it.col}|${it.row}|${it.w}|${it.h}" }
+            l.joinToString("\n") { "${it.key}|${it.col}|${it.row}|${it.w}|${it.h}|${it.page}" }
         ).apply()
     }
 
