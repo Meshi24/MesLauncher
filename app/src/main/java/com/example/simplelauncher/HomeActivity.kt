@@ -3,6 +3,7 @@ package com.example.simplelauncher
 import android.app.Activity
 import android.app.ActivityOptions
 import android.app.AlertDialog
+import android.app.KeyguardManager
 import android.content.ActivityNotFoundException
 import android.content.BroadcastReceiver
 import android.content.ComponentName
@@ -15,7 +16,6 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
-import android.os.PowerManager
 import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
@@ -40,7 +40,6 @@ import androidx.core.widget.doAfterTextChanged
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
-import kotlin.math.abs
 
 class HomeActivity : Activity() {
 
@@ -50,10 +49,12 @@ class HomeActivity : Activity() {
 
     private var allApps: List<App> = emptyList()
 
-    private lateinit var root: TouchFrame
+    private lateinit var root: DragFrame
     private lateinit var homeLayer: FrameLayout
-    private lateinit var homeGrid: HomeGrid
+    private lateinit var pager: Pager
+    private val grids = ArrayList<HomeGrid>()
     private lateinit var bottomBar: LinearLayout
+    private lateinit var dots: LinearLayout
     private lateinit var dockBar: LinearLayout
     private lateinit var pill: TextView
     private lateinit var drawerLayer: FrameLayout
@@ -74,18 +75,29 @@ class HomeActivity : Activity() {
     private var pendH = 1
     private var firstResume = true
 
-    // status buat animasi ikon
+    // status animasi ikon
     private var paused = false
-    private var skipNext = false
     private var scattered = false
+    private var waitingUnlock = false
+    private var focusLost = false
+    private var dialogs = 0
 
-    private var downX = 0f
-    private var downY = 0f
+    // status gesture
     private var atTopOnDown = true
     private var ignoreSwipe = false
+    private var dragOpening = false
 
     private val pkgReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) = loadApps()
+    }
+
+    private val unlockReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (waitingUnlock && !paused) {
+                waitingUnlock = false
+                root.post { playGather() }
+            }
+        }
     }
 
     // ---------------------------------------------------------------- setup
@@ -95,7 +107,8 @@ class HomeActivity : Activity() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         window.isNavigationBarContrastEnforced = false
 
-        root = TouchFrame(this) { ev -> onSwipe(ev) }
+        root = DragFrame(this)
+        setupGestures()
         buildHome()
         buildDrawer()
         root.addView(homeLayer, FrameLayout.LayoutParams(MATCH, MATCH))
@@ -118,11 +131,16 @@ class HomeActivity : Activity() {
             addDataScheme("package")
         }
         ContextCompat.registerReceiver(this, pkgReceiver, filter, ContextCompat.RECEIVER_EXPORTED)
+        ContextCompat.registerReceiver(
+            this, unlockReceiver, IntentFilter(Intent.ACTION_USER_PRESENT),
+            ContextCompat.RECEIVER_EXPORTED
+        )
         loadApps()
     }
 
     override fun onDestroy() {
         unregisterReceiver(pkgReceiver)
+        unregisterReceiver(unlockReceiver)
         super.onDestroy()
     }
 
@@ -133,17 +151,28 @@ class HomeActivity : Activity() {
 
     private fun lp(v: View) = v.layoutParams as FrameLayout.LayoutParams
 
+    private fun AlertDialog.Builder.showT() {
+        val d = create()
+        dialogs++
+        d.setOnDismissListener { dialogs = maxOf(0, dialogs - 1) }
+        d.show()
+    }
+
     private fun buildHome() {
         homeLayer = FrameLayout(this)
 
-        homeGrid = HomeGrid(this)
-        homeGrid.onCellTap = { c, r -> placePending(c, r) }
-        homeGrid.setOnLongClickListener { showHomeMenu(); true }
-        homeLayer.addView(homeGrid, FrameLayout.LayoutParams(MATCH, MATCH))
+        pager = Pager(this)
+        pager.onPageChanged = { renderDots() }
+        homeLayer.addView(pager, FrameLayout.LayoutParams(MATCH, MATCH))
 
         bottomBar = LinearLayout(this)
         bottomBar.orientation = LinearLayout.VERTICAL
         bottomBar.gravity = Gravity.CENTER_HORIZONTAL
+
+        dots = LinearLayout(this)
+        dots.orientation = LinearLayout.HORIZONTAL
+        dots.gravity = Gravity.CENTER
+        bottomBar.addView(dots, LinearLayout.LayoutParams(WRAP, dp(14)))
 
         pill = TextView(this)
         pill.text = "Cari app"
@@ -190,12 +219,12 @@ class HomeActivity : Activity() {
     }
 
     private fun applyInsets() {
-        lp(homeGrid).topMargin = insTop + dp(8)
-        lp(homeGrid).bottomMargin = insBottom + dp(146)
+        lp(pager).topMargin = insTop + dp(8)
+        lp(pager).bottomMargin = insBottom + dp(160)
         bottomBar.setPadding(dp(12), 0, dp(12), insBottom + dp(10))
         lp(searchBox).topMargin = insTop + dp(12)
         lp(drawerContent).topMargin = insTop + dp(68)
-        homeGrid.requestLayout()
+        pager.requestLayout()
         bottomBar.requestLayout()
         searchBox.requestLayout()
         drawerContent.requestLayout()
@@ -237,8 +266,6 @@ class HomeActivity : Activity() {
 
     private fun applySettings() {
         lightWp = wallpaperIsLight(this)
-        homeGrid.cols = Prefs.cols(this)
-        homeGrid.rows = Prefs.rows(this)
         renderHome()
         renderDock()
         val light = dockLight()
@@ -247,55 +274,109 @@ class HomeActivity : Activity() {
         if (drawerOpen) renderDrawer()
     }
 
+    private fun isMoving(): Boolean = grids.any { it.moving }
+
+    private fun setMoving(b: Boolean) {
+        for (g in grids) g.moving = b
+    }
+
+    private fun ensureGrids() {
+        val n = Prefs.pages(this).coerceIn(1, 10)
+        if (grids.size == n) return
+        while (grids.size > n) grids.removeAt(grids.size - 1)
+        while (grids.size < n) {
+            val idx = grids.size
+            val g = HomeGrid(this)
+            g.onCellTap = { c, r -> placePending(idx, c, r) }
+            g.setOnLongClickListener { showHomeMenu(); true }
+            grids.add(g)
+        }
+        pager.setPages(grids)
+    }
+
+    private fun renderDots() {
+        dots.removeAllViews()
+        val n = grids.size
+        if (n <= 1) {
+            dots.visibility = View.INVISIBLE
+            return
+        }
+        dots.visibility = View.VISIBLE
+        val on = if (dockLight()) 0xFF111111.toInt() else 0xFFFFFFFF.toInt()
+        val off = if (dockLight()) 0x66111111 else 0x66FFFFFF
+        for (i in 0 until n) {
+            val v = View(this)
+            val sel = i == pager.page
+            v.background = rounded(if (sel) on else off, dp(4).toFloat())
+            val s = if (sel) dp(8) else dp(6)
+            val dlp = LinearLayout.LayoutParams(s, s)
+            dlp.setMargins(dp(3), 0, dp(3), 0)
+            dots.addView(v, dlp)
+        }
+    }
+
     private fun renderHome() {
-        homeGrid.removeAllViews()
-        val cols = homeGrid.cols
-        val rows = homeGrid.rows
+        ensureGrids()
+        val cols = Prefs.cols(this)
+        val rows = Prefs.rows(this)
         val folders = Prefs.folders(this)
         val lc = if (lightWp) 0xFF111111.toInt() else Color.WHITE
         val light = dockLight()
         val cardColor = if (light) 0x66FFFFFF else 0x66000000
         val cardText = if (light) 0xFF111111.toInt() else Color.WHITE
+        val showLabel = Prefs.showLabels(this)
+        val scale = Prefs.iconScale(this) / 100f
+        val labelSp = 11f * Prefs.labelScale(this) / 100f
+        val all = Prefs.home(this)
 
-        for (p in Prefs.home(this)) {
-            if (p.col >= cols || p.row >= rows) continue
-            val w = minOf(p.w, cols - p.col)
-            val h = minOf(p.h, rows - p.row)
+        for ((pi, g) in grids.withIndex()) {
+            g.cols = cols
+            g.rows = rows
+            g.removeAllViews()
+            g.moving = pendingKey != null
 
-            if (p.key.startsWith("folder:")) {
-                val f = folders.firstOrNull { "folder:" + it.id == p.key } ?: continue
-                val apps = f.keys.mapNotNull { k -> allApps.firstOrNull { it.key == k } }
-                val v = FolderView(this, f.name, apps, w, h, cardColor, cardText)
-                v.layoutParams = HomeGrid.LP(p.col, p.row, w, h)
-                v.setOnClickListener { openHomeFolder(f, apps) }
-                v.setOnLongClickListener { folderMenu(f); true }
-                v.pressSpring()
-                homeGrid.addView(v)
-                continue
+            for (p in all) {
+                if (p.page != pi) continue
+                if (p.col >= cols || p.row >= rows) continue
+                val w = minOf(p.w, cols - p.col)
+                val h = minOf(p.h, rows - p.row)
+
+                if (p.key.startsWith("folder:")) {
+                    val f = folders.firstOrNull { "folder:" + it.id == p.key } ?: continue
+                    val apps = f.keys.mapNotNull { k -> allApps.firstOrNull { it.key == k } }
+                    val v = FolderView(this, f.name, apps, w, h, cardColor, cardText)
+                    v.layoutParams = HomeGrid.LP(p.col, p.row, w, h)
+                    v.setOnClickListener { openHomeFolder(f, apps) }
+                    v.setOnLongClickListener { folderMenu(f); true }
+                    v.pressSpring()
+                    g.addView(v)
+                    continue
+                }
+
+                val app = allApps.firstOrNull { it.key == p.key } ?: continue
+                if (w == 1 && h == 1) {
+                    val cell = HomeIcon(this, lc, showLabel, scale, labelSp)
+                    cell.bind(app)
+                    cell.layoutParams = HomeGrid.LP(p.col, p.row, 1, 1)
+                    cell.setOnClickListener { launchApp(app, cell.icon) }
+                    cell.setOnLongClickListener { homeAppMenu(app); true }
+                    cell.pressSpring()
+                    g.addView(cell)
+                } else {
+                    val big = BigAppView(this, w >= 2 && h == 1, cardText, cardColor)
+                    big.icon.setImageDrawable(app.iconCopy())
+                    big.label.text = app.label
+                    big.layoutParams = HomeGrid.LP(p.col, p.row, w, h)
+                    big.setOnClickListener { launchApp(app, big.icon) }
+                    big.setOnLongClickListener { homeAppMenu(app); true }
+                    big.pressSpring()
+                    g.addView(big)
+                }
             }
-
-            val app = allApps.firstOrNull { it.key == p.key } ?: continue
-            if (w == 1 && h == 1) {
-                val cell = IconCell(this, lc, true, cols <= 6)
-                cell.bind(app)
-                cell.layoutParams = HomeGrid.LP(p.col, p.row, 1, 1)
-                cell.setOnClickListener { launchApp(app, cell.icon) }
-                cell.setOnLongClickListener { homeAppMenu(app); true }
-                cell.pressSpring()
-                homeGrid.addView(cell)
-            } else {
-                val big = BigAppView(this, w >= 2 && h == 1, cardText, cardColor)
-                big.icon.setImageDrawable(app.iconCopy())
-                big.label.text = app.label
-                big.layoutParams = HomeGrid.LP(p.col, p.row, w, h)
-                big.setOnClickListener { launchApp(app, big.icon) }
-                big.setOnLongClickListener { homeAppMenu(app); true }
-                big.pressSpring()
-                homeGrid.addView(big)
-            }
+            g.requestLayout()
+            g.invalidate()
         }
-        homeGrid.requestLayout()
-        homeGrid.invalidate()
+        renderDots()
     }
 
     private fun renderDock() {
@@ -315,7 +396,7 @@ class HomeActivity : Activity() {
             return
         }
         for (a in apps) {
-            val cell = IconCell(this, Color.WHITE, true, false)
+            val cell = HomeIcon(this, Color.WHITE, false, 1f, 11f)
             cell.bind(a)
             cell.setOnClickListener { launchApp(a, cell.icon) }
             cell.setOnLongClickListener { dockMenu(a); true }
@@ -326,25 +407,37 @@ class HomeActivity : Activity() {
 
     // ------------------------------------------------------- icon animation
 
-    private fun homeViews(): List<View> =
-        (0 until homeGrid.childCount).map { homeGrid.getChildAt(it) }
+    private fun homeViews(): List<View> {
+        val g = grids.getOrNull(pager.currentPage()) ?: return emptyList()
+        return (0 until g.childCount).map { g.getChildAt(it) }
+    }
 
     private fun resetFx() {
         scattered = false
         IconFx.reset(dockBar)
         IconFx.reset(pill)
-        for (v in homeViews()) IconFx.reset(v)
+        for (g in grids) {
+            for (i in 0 until g.childCount) IconFx.reset(g.getChildAt(i))
+        }
     }
 
-    /** Ikon ngumpul masuk (pas balik ke home dari app). */
+    private fun hideForUnlock() {
+        for (v in homeViews()) IconFx.hide(v)
+        IconFx.hide(dockBar)
+        IconFx.hide(pill)
+    }
+
+    /** Ikon ngumpul masuk. */
     private fun playGather() {
+        waitingUnlock = false
         val w = root.width
         val h = root.height
         if (w == 0 || h == 0) return
+        val sp = Prefs.animSpeed(this) / 100f
         scattered = false
-        IconFx.gather(homeViews(), w, h)
-        IconFx.barIn(dockBar, dp(120).toFloat())
-        IconFx.barIn(pill, dp(120).toFloat())
+        IconFx.gather(homeViews(), w, h, sp)
+        IconFx.barIn(dockBar, dp(120).toFloat(), sp)
+        IconFx.barIn(pill, dp(120).toFloat(), sp)
     }
 
     /** Ikon mencar keluar (pas buka app). */
@@ -352,20 +445,23 @@ class HomeActivity : Activity() {
         val w = root.width
         val h = root.height
         if (w == 0 || h == 0) return
-        IconFx.scatter(homeViews(), w, h)
-        IconFx.barOut(dockBar, dp(120).toFloat())
-        IconFx.barOut(pill, dp(120).toFloat())
+        val sp = Prefs.animSpeed(this) / 100f
+        IconFx.scatter(homeViews(), w, h, sp)
+        IconFx.barOut(dockBar, dp(120).toFloat(), sp)
+        IconFx.barOut(pill, dp(120).toFloat(), sp)
         scattered = true
         // jaga-jaga: kalau app-nya nggak jadi kebuka, balikin ikonnya
         root.postDelayed({
             if (scattered && !paused) playGather()
-        }, 1200)
+        }, 1500)
     }
 
     // ------------------------------------------------------- home actions
 
-    private fun fits(list: List<Placed>, c: Int, r: Int, w: Int, h: Int): Boolean =
-        list.none { c < it.col + it.w && it.col < c + w && r < it.row + it.h && it.row < r + h }
+    private fun fits(list: List<Placed>, page: Int, c: Int, r: Int, w: Int, h: Int): Boolean =
+        list.none {
+            it.page == page && c < it.col + it.w && it.col < c + w && r < it.row + it.h && it.row < r + h
+        }
 
     private fun startPlace(key: String, defW: Int = 1, defH: Int = 1) {
         val cur = Prefs.home(this)
@@ -377,24 +473,28 @@ class HomeActivity : Activity() {
         pendingKey = key
         renderHome()
         closeDrawer(true)
-        homeGrid.moving = true
-        Toast.makeText(this, "Tap kotak kosong buat naruh", Toast.LENGTH_SHORT).show()
+        setMoving(true)
+        Toast.makeText(
+            this,
+            "Tap kotak kosong buat naruh. Geser kiri/kanan buat ganti halaman",
+            Toast.LENGTH_LONG
+        ).show()
     }
 
-    private fun placePending(c: Int, r: Int) {
+    private fun placePending(page: Int, c: Int, r: Int) {
         val key = pendingKey ?: return
-        val cols = homeGrid.cols
-        val rows = homeGrid.rows
+        val cols = Prefs.cols(this)
+        val rows = Prefs.rows(this)
         val w = minOf(pendW, cols)
         val h = minOf(pendH, rows)
         val cc = minOf(c, cols - w)
         val rr = minOf(r, rows - h)
         val cur = Prefs.home(this)
-        if (!fits(cur, cc, rr, w, h)) {
+        if (!fits(cur, page, cc, rr, w, h)) {
             Toast.makeText(this, "Nggak muat di situ, pilih tempat lain", Toast.LENGTH_SHORT).show()
             return
         }
-        Prefs.saveHome(this, cur + Placed(key, cc, rr, w, h))
+        Prefs.saveHome(this, cur + Placed(key, cc, rr, w, h, page))
         endMove()
         renderHome()
     }
@@ -402,7 +502,7 @@ class HomeActivity : Activity() {
     private fun endMove() {
         pendingKey = null
         pendingOrig = null
-        homeGrid.moving = false
+        setMoving(false)
     }
 
     private fun cancelMove() {
@@ -421,12 +521,14 @@ class HomeActivity : Activity() {
     private fun resizeItem(key: String, w0: Int, h0: Int) {
         val cur = Prefs.home(this)
         val item = cur.firstOrNull { it.key == key } ?: return
-        val w = minOf(w0, homeGrid.cols)
-        val h = minOf(h0, homeGrid.rows)
-        val c = minOf(item.col, homeGrid.cols - w)
-        val r = minOf(item.row, homeGrid.rows - h)
+        val cols = Prefs.cols(this)
+        val rows = Prefs.rows(this)
+        val w = minOf(w0, cols)
+        val h = minOf(h0, rows)
+        val c = minOf(item.col, cols - w)
+        val r = minOf(item.row, rows - h)
         val others = cur.filter { it.key != key }
-        if (!fits(others, c, r, w, h)) {
+        if (!fits(others, item.page, c, r, w, h)) {
             Toast.makeText(
                 this,
                 "Nggak muat. Kosongin tempat di sebelahnya atau pindahin dulu",
@@ -434,7 +536,7 @@ class HomeActivity : Activity() {
             ).show()
             return
         }
-        Prefs.saveHome(this, others + Placed(key, c, r, w, h))
+        Prefs.saveHome(this, others + Placed(key, c, r, w, h, item.page))
         renderHome()
     }
 
@@ -442,7 +544,7 @@ class HomeActivity : Activity() {
         AlertDialog.Builder(this).setTitle("Ukuran (lebar x tinggi)")
             .setItems(arrayOf("1x1  normal", "2x1  lebar", "1x2  tinggi", "2x2  besar")) { _, i ->
                 resizeItem(key, sizes[i].first, sizes[i].second)
-            }.show()
+            }.showT()
     }
 
     private fun homeAppMenu(app: App) {
@@ -458,7 +560,7 @@ class HomeActivity : Activity() {
                     3 -> openInfo(app.pkg)
                     else -> {}
                 }
-            }.show()
+            }.showT()
     }
 
     private fun dockMenu(app: App) {
@@ -472,7 +574,7 @@ class HomeActivity : Activity() {
                     1 -> openInfo(app.pkg)
                     else -> {}
                 }
-            }.show()
+            }.showT()
     }
 
     private fun addToDock(app: App) {
@@ -508,7 +610,7 @@ class HomeActivity : Activity() {
                     }
                     else -> {}
                 }
-            }.show()
+            }.showT()
     }
 
     private fun openInfo(pkg: String) {
@@ -534,7 +636,7 @@ class HomeActivity : Activity() {
                     4 -> uninstall(app.pkg)
                     else -> {}
                 }
-            }.show()
+            }.showT()
     }
 
     private fun launchApp(app: App, view: View) {
@@ -572,7 +674,7 @@ class HomeActivity : Activity() {
                 onDone(apps.indices.filter { checked[it] }.map { apps[it].key })
             }
             .setNegativeButton("Batal", null)
-            .show()
+            .showT()
     }
 
     private fun createFolder() {
@@ -589,7 +691,7 @@ class HomeActivity : Activity() {
                 }
             }
             .setNegativeButton("Batal", null)
-            .show()
+            .showT()
     }
 
     private fun saveFolder(f: Folder) {
@@ -612,7 +714,7 @@ class HomeActivity : Activity() {
                 saveFolder(f.copy(name = cleanName(input.text.toString())))
             }
             .setNegativeButton("Batal", null)
-            .show()
+            .showT()
     }
 
     private fun folderMenu(f: Folder) {
@@ -627,7 +729,7 @@ class HomeActivity : Activity() {
                     4 -> deleteFolder(f)
                     else -> {}
                 }
-            }.show()
+            }.showT()
     }
 
     private fun addToFolder(app: App) {
@@ -645,7 +747,7 @@ class HomeActivity : Activity() {
                 val f = fs[i]
                 if (!f.keys.contains(app.key)) saveFolder(f.copy(keys = f.keys + app.key))
                 Toast.makeText(this, "Ditambah ke " + f.name, Toast.LENGTH_SHORT).show()
-            }.show()
+            }.showT()
     }
 
     private fun folderAppMenu(f: Folder, app: App) {
@@ -659,7 +761,7 @@ class HomeActivity : Activity() {
                     1 -> openInfo(app.pkg)
                     else -> {}
                 }
-            }.show()
+            }.showT()
     }
 
     private fun openHomeFolder(f: Folder, apps: List<App>) {
@@ -725,29 +827,83 @@ class HomeActivity : Activity() {
         homeFolder = null
     }
 
-    // ------------------------------------------------------- swipe + drawer
+    // ----------------------------------------------- gesture: drawer ngikut jari
 
-    private fun onSwipe(ev: MotionEvent) {
-        when (ev.actionMasked) {
-            MotionEvent.ACTION_DOWN -> {
-                ignoreSwipe = false
-                downX = ev.rawX
-                downY = ev.rawY
-                val sc = overlayScroll ?: drawerScroll
-                atTopOnDown = !(sc?.canScrollVertically(-1) ?: false)
-            }
-            MotionEvent.ACTION_UP -> {
-                if (ignoreSwipe) return
-                val dx = ev.rawX - downX
-                val dy = ev.rawY - downY
-                if (abs(dy) < abs(dx) * 1.5f) return
-                if (!drawerOpen && !homeGrid.moving && homeFolder == null && dy < -dp(90)) {
-                    openDrawer(false)
-                } else if (drawerOpen && atTopOnDown && dy > dp(110)) {
-                    if (overlay != null) closeOverlay() else closeDrawer(true)
-                }
+    private fun setupGestures() {
+        root.onDown = {
+            ignoreSwipe = false
+            val sc = overlayScroll ?: drawerScroll
+            atTopOnDown = !(sc?.canScrollVertically(-1) ?: false)
+        }
+        root.decide = { _, dy ->
+            when {
+                ignoreSwipe -> 0
+                !drawerOpen && dy < 0 && !isMoving() && homeFolder == null -> 1
+                drawerOpen && dy > 0 && atTopOnDown -> 2
+                else -> 0
             }
         }
+        root.onStart = { mode -> startDrag(mode) }
+        root.onMove = { dy -> moveDrag(dy) }
+        root.onEnd = { vy -> endDrag(vy) }
+    }
+
+    private fun startDrag(mode: Int) {
+        drawerLayer.animate().cancel()
+        homeLayer.animate().cancel()
+        dragOpening = mode == 1
+        if (dragOpening) {
+            drawerOpen = true
+            searchBox.setText("")
+            renderDrawer()
+            drawerLayer.visibility = View.VISIBLE
+            drawerLayer.translationY = root.height.toFloat()
+        }
+    }
+
+    private fun moveDrag(dy: Float) {
+        val hgt = root.height.toFloat()
+        if (hgt <= 0f) return
+        val ov = overlay
+        if (!dragOpening && ov != null) {
+            ov.translationY = dy.coerceIn(0f, hgt)
+            return
+        }
+        val ty = if (dragOpening) (hgt + dy).coerceIn(0f, hgt) else dy.coerceIn(0f, hgt)
+        drawerLayer.translationY = ty
+        val p = 1f - ty / hgt
+        homeLayer.alpha = 1f - p
+        homeLayer.scaleX = 1f - 0.05f * p
+        homeLayer.scaleY = 1f - 0.05f * p
+    }
+
+    private fun endDrag(vy: Float) {
+        val hgt = root.height.toFloat()
+        val ov = overlay
+        if (!dragOpening && ov != null) {
+            if (vy > 900f || ov.translationY > hgt * 0.25f) {
+                closeOverlay()
+            } else {
+                ov.animate().translationY(0f).setDuration(180).start()
+            }
+            return
+        }
+        val ty = drawerLayer.translationY
+        if (dragOpening) {
+            val open = if (vy < -900f) true else if (vy > 900f) false else ty < hgt * 0.6f
+            if (open) settleOpen() else closeDrawer(true)
+        } else {
+            val close = if (vy > 900f) true else if (vy < -900f) false else ty > hgt * 0.25f
+            if (close) closeDrawer(true) else settleOpen()
+        }
+    }
+
+    private fun settleOpen() {
+        drawerLayer.animate().cancel()
+        drawerLayer.animate().translationY(0f).setDuration(220)
+            .setInterpolator(DecelerateInterpolator()).start()
+        homeLayer.animate().cancel()
+        homeLayer.animate().alpha(0f).scaleX(0.95f).scaleY(0.95f).setDuration(220).start()
     }
 
     private fun hideKeyboard() {
@@ -1005,17 +1161,18 @@ class HomeActivity : Activity() {
     override fun onPause() {
         super.onPause()
         paused = true
-        // kalau layar mati (lock), resume berikutnya = unlock, jadi tanpa animasi
-        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        skipNext = !pm.isInteractive
+        if (waitingUnlock) {
+            waitingUnlock = false
+            resetFx()
+        }
     }
 
     override fun onResume() {
         super.onResume()
         paused = false
-        val animate = !firstResume && !skipNext
+        focusLost = false
+        val animate = !firstResume
         firstResume = false
-        skipNext = false
 
         if (drawerOpen) closeDrawer(false)
         homeLayer.animate().cancel()
@@ -1026,8 +1183,35 @@ class HomeActivity : Activity() {
         resetFx()
 
         if (animate) {
-            // jalan setelah layout selesai, sebelum frame pertama digambar
-            homeLayer.doOnPreDraw { playGather() }
+            val kg = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+            if (kg.isKeyguardLocked) {
+                // masih di balik lock screen: tahan dulu, animasi jalan pas unlock
+                waitingUnlock = true
+                hideForUnlock()
+            } else {
+                homeLayer.doOnPreDraw { playGather() }
+            }
+        }
+    }
+
+    /** Deteksi notifikasi / quick settings ditutup: fokus window hilang lalu balik. */
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (!hasFocus) {
+            if (!paused && dialogs == 0 && !firstResume) focusLost = true
+            return
+        }
+        val kg = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+        if (waitingUnlock && !kg.isKeyguardLocked) {
+            focusLost = false
+            root.post { playGather() }
+            return
+        }
+        if (focusLost) {
+            focusLost = false
+            if (!paused && dialogs == 0 && !drawerOpen && homeFolder == null && !waitingUnlock) {
+                root.post { playGather() }
+            }
         }
     }
 
@@ -1036,8 +1220,12 @@ class HomeActivity : Activity() {
         if (intent.action == Intent.ACTION_MAIN) {
             closeHomeFolder()
             closeOverlay()
-            if (homeGrid.moving) cancelMove()
-            if (drawerOpen) closeDrawer(true)
+            if (isMoving()) cancelMove()
+            if (drawerOpen) {
+                closeDrawer(true)
+            } else if (pager.page != 0) {
+                pager.goTo(0)
+            }
         }
     }
 
@@ -1046,7 +1234,7 @@ class HomeActivity : Activity() {
         when {
             homeFolder != null -> closeHomeFolder()
             overlay != null -> closeOverlay()
-            homeGrid.moving -> cancelMove()
+            isMoving() -> cancelMove()
             drawerOpen -> closeDrawer(true)
         }
     }
