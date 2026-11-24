@@ -5,6 +5,7 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Bundle
 import android.util.TypedValue
+import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
@@ -33,13 +34,24 @@ class SettingsActivity : Activity() {
 
         box.addView(tv("Setelan MesLauncher", 22f, true))
 
-        box.addView(tv("Home grid", 17f, true, 24))
-        val colsLabel = tv("", 15f)
-        box.addView(colsLabel)
-        box.addView(seek(colsLabel, "Kolom", Prefs.cols(this)) { Prefs.setCols(this, it) })
-        val rowsLabel = tv("", 15f)
-        box.addView(rowsLabel)
-        box.addView(seek(rowsLabel, "Baris", Prefs.rows(this)) { Prefs.setRows(this, it) })
+        box.addView(tv("Home", 17f, true, 24))
+        seek(box, "Kolom", "", 1, 10, 1, Prefs.cols(this)) { Prefs.setCols(this, it) }
+        seek(box, "Baris", "", 1, 10, 1, Prefs.rows(this)) { Prefs.setRows(this, it) }
+        seek(box, "Jumlah halaman", "", 1, 10, 1, Prefs.pages(this)) { Prefs.setPages(this, it) }
+
+        box.addView(tv("Ikon", 17f, true, 24))
+        seek(box, "Ukuran ikon", "%", 60, 140, 5, Prefs.iconScale(this)) { Prefs.setIconScale(this, it) }
+        seek(box, "Ukuran label", "%", 70, 140, 5, Prefs.labelScale(this)) { Prefs.setLabelScale(this, it) }
+        val cb = CheckBox(this)
+        cb.text = "Tampilkan label ikon"
+        cb.setTextColor(Color.WHITE)
+        cb.isChecked = Prefs.showLabels(this)
+        cb.setOnCheckedChangeListener { _, b -> Prefs.setShowLabels(this, b) }
+        box.addView(cb)
+
+        box.addView(tv("Animasi", 17f, true, 24))
+        seek(box, "Kecepatan animasi", "%", 50, 200, 10, Prefs.animSpeed(this)) { Prefs.setAnimSpeed(this, it) }
+        box.addView(tv("Makin kecil makin pelan.", 12f, false, 0, 0xFF9E9E9E.toInt()))
 
         box.addView(tv("Gaya app drawer", 17f, true, 24))
         box.addView(
@@ -72,20 +84,33 @@ class SettingsActivity : Activity() {
         return v
     }
 
-    private fun seek(label: TextView, name: String, value: Int, save: (Int) -> Unit): SeekBar {
-        label.text = "$name: $value"
+    private fun seek(
+        box: LinearLayout,
+        title: String,
+        unit: String,
+        min: Int,
+        max: Int,
+        step: Int,
+        value: Int,
+        save: (Int) -> Unit
+    ) {
+        val label = tv("", 15f)
+        box.addView(label)
+        val v0 = value.coerceIn(min, max)
+        label.text = "$title: $v0$unit"
         val s = SeekBar(this)
-        s.max = 9
-        s.progress = value - 1
+        s.max = (max - min) / step
+        s.progress = (v0 - min) / step
         s.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
-                label.text = "$name: ${p + 1}"
-                save(p + 1)
+                val v = min + p * step
+                label.text = "$title: $v$unit"
+                save(v)
             }
             override fun onStartTrackingTouch(sb: SeekBar?) {}
             override fun onStopTrackingTouch(sb: SeekBar?) {}
         })
-        return s
+        box.addView(s)
     }
 
     private fun radios(base: Int, options: List<String>, current: Int, onPick: (Int) -> Unit): RadioGroup {
