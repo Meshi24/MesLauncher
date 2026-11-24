@@ -5,7 +5,7 @@ import android.view.animation.AccelerateInterpolator
 import android.view.animation.DecelerateInterpolator
 import kotlin.math.hypot
 
-/** Efek ikon mencar / ngumpul ala iOS. */
+/** Efek ikon mencar / ngumpul ala iOS. speed: 1.0 normal, makin kecil makin pelan. */
 object IconFx {
     private const val K = 1.6f
 
@@ -18,6 +18,11 @@ object IconFx {
         v.scaleX = 1f
         v.scaleY = 1f
         v.alpha = 1f
+    }
+
+    fun hide(v: View) {
+        v.animate().cancel()
+        v.alpha = 0f
     }
 
     private fun measure(views: List<View>, w: Int, h: Int): List<Off> {
@@ -34,7 +39,7 @@ object IconFx {
     }
 
     /** Ikon mulai melebar + gede + transparan, lalu ngumpul ke tempatnya. */
-    fun gather(views: List<View>, w: Int, h: Int) {
+    fun gather(views: List<View>, w: Int, h: Int, speed: Float) {
         val offs = measure(views, w, h)
         val max = (offs.maxOfOrNull { it.dist } ?: 1f).coerceAtLeast(1f)
         for (o in offs) {
@@ -46,45 +51,45 @@ object IconFx {
             o.v.animate()
                 .translationX(0f).translationY(0f)
                 .scaleX(1f).scaleY(1f).alpha(1f)
-                .setStartDelay((o.dist / max * 70f).toLong())
-                .setDuration(340)
-                .setInterpolator(DecelerateInterpolator(1.8f))
+                .setStartDelay((o.dist / max * 180f / speed).toLong())
+                .setDuration((650f / speed).toLong())
+                .setInterpolator(DecelerateInterpolator(2f))
                 .start()
         }
     }
 
     /** Kebalikannya: ikon mencar keluar sambil memudar. */
-    fun scatter(views: List<View>, w: Int, h: Int) {
+    fun scatter(views: List<View>, w: Int, h: Int, speed: Float) {
         val offs = measure(views, w, h)
         for (o in offs) {
             o.v.animate()
                 .translationX(o.dx * (K - 1f)).translationY(o.dy * (K - 1f))
                 .scaleX(K).scaleY(K).alpha(0f)
                 .setStartDelay(0)
-                .setDuration(240)
+                .setDuration((380f / speed).toLong())
                 .setInterpolator(AccelerateInterpolator(1.4f))
                 .start()
         }
     }
 
     /** Dock dan search pill naik dari bawah. */
-    fun barIn(v: View, dist: Float) {
+    fun barIn(v: View, dist: Float, speed: Float) {
         v.animate().cancel()
         v.translationY = dist
         v.alpha = 0f
         v.animate().translationY(0f).alpha(1f)
             .setStartDelay(0)
-            .setDuration(340)
-            .setInterpolator(DecelerateInterpolator(1.8f))
+            .setDuration((650f / speed).toLong())
+            .setInterpolator(DecelerateInterpolator(2f))
             .start()
     }
 
     /** Dock dan search pill turun keluar. */
-    fun barOut(v: View, dist: Float) {
+    fun barOut(v: View, dist: Float, speed: Float) {
         v.animate().cancel()
         v.animate().translationY(dist).alpha(0f)
             .setStartDelay(0)
-            .setDuration(240)
+            .setDuration((380f / speed).toLong())
             .setInterpolator(AccelerateInterpolator(1.4f))
             .start()
     }
