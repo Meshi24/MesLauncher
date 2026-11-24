@@ -15,6 +15,7 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
+import android.os.PowerManager
 import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
@@ -34,6 +35,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.doOnPreDraw
 import androidx.core.widget.doAfterTextChanged
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -71,6 +73,11 @@ class HomeActivity : Activity() {
     private var pendW = 1
     private var pendH = 1
     private var firstResume = true
+
+    // status buat animasi ikon
+    private var paused = false
+    private var skipNext = false
+    private var scattered = false
 
     private var downX = 0f
     private var downY = 0f
@@ -317,6 +324,44 @@ class HomeActivity : Activity() {
         }
     }
 
+    // ------------------------------------------------------- icon animation
+
+    private fun homeViews(): List<View> =
+        (0 until homeGrid.childCount).map { homeGrid.getChildAt(it) }
+
+    private fun resetFx() {
+        scattered = false
+        IconFx.reset(dockBar)
+        IconFx.reset(pill)
+        for (v in homeViews()) IconFx.reset(v)
+    }
+
+    /** Ikon ngumpul masuk (pas balik ke home dari app). */
+    private fun playGather() {
+        val w = root.width
+        val h = root.height
+        if (w == 0 || h == 0) return
+        scattered = false
+        IconFx.gather(homeViews(), w, h)
+        IconFx.barIn(dockBar, dp(120).toFloat())
+        IconFx.barIn(pill, dp(120).toFloat())
+    }
+
+    /** Ikon mencar keluar (pas buka app). */
+    private fun playScatter() {
+        val w = root.width
+        val h = root.height
+        if (w == 0 || h == 0) return
+        IconFx.scatter(homeViews(), w, h)
+        IconFx.barOut(dockBar, dp(120).toFloat())
+        IconFx.barOut(pill, dp(120).toFloat())
+        scattered = true
+        // jaga-jaga: kalau app-nya nggak jadi kebuka, balikin ikonnya
+        root.postDelayed({
+            if (scattered && !paused) playGather()
+        }, 1200)
+    }
+
     // ------------------------------------------------------- home actions
 
     private fun fits(list: List<Placed>, c: Int, r: Int, w: Int, h: Int): Boolean =
@@ -501,6 +546,7 @@ class HomeActivity : Activity() {
         val opts = ActivityOptions.makeClipRevealAnimation(view, 0, 0, view.width, view.height)
         try {
             startActivity(intent, opts.toBundle())
+            playScatter()
         } catch (e: ActivityNotFoundException) {
             loadApps()
         }
@@ -956,19 +1002,33 @@ class HomeActivity : Activity() {
 
     // ------------------------------------------------------------ lifecycle
 
+    override fun onPause() {
+        super.onPause()
+        paused = true
+        // kalau layar mati (lock), resume berikutnya = unlock, jadi tanpa animasi
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        skipNext = !pm.isInteractive
+    }
+
     override fun onResume() {
         super.onResume()
-        applySettings()
-        if (firstResume) {
-            firstResume = false
-            return
-        }
+        paused = false
+        val animate = !firstResume && !skipNext
+        firstResume = false
+        skipNext = false
+
         if (drawerOpen) closeDrawer(false)
-        homeLayer.scaleX = 0.92f
-        homeLayer.scaleY = 0.92f
-        homeLayer.alpha = 0f
-        homeLayer.animate().scaleX(1f).scaleY(1f).alpha(1f)
-            .setDuration(250).setInterpolator(DecelerateInterpolator()).start()
+        homeLayer.animate().cancel()
+        homeLayer.alpha = 1f
+        homeLayer.scaleX = 1f
+        homeLayer.scaleY = 1f
+        applySettings()
+        resetFx()
+
+        if (animate) {
+            // jalan setelah layout selesai, sebelum frame pertama digambar
+            homeLayer.doOnPreDraw { playGather() }
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
