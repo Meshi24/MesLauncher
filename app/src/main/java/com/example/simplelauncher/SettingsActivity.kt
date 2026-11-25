@@ -54,7 +54,7 @@ class SettingsActivity : Activity() {
         )
 
         box.addView(tv("Ikon", 17f, true, 24))
-        seek(box, "Ukuran ikon", "%", 60, 140, 5, Prefs.iconScale(this)) { Prefs.setIconScale(this, it) }
+        seek(box, "Ukuran ikon (dock ikut)", "%", 60, 140, 5, Prefs.iconScale(this)) { Prefs.setIconScale(this, it) }
         seek(box, "Ukuran label", "%", 70, 140, 5, Prefs.labelScale(this)) { Prefs.setLabelScale(this, it) }
         val cb = CheckBox(this)
         cb.text = "Tampilkan label ikon"
@@ -62,6 +62,41 @@ class SettingsActivity : Activity() {
         cb.isChecked = Prefs.showLabels(this)
         cb.setOnCheckedChangeListener { _, b -> Prefs.setShowLabels(this, b) }
         box.addView(cb)
+
+        box.addView(tv("Icon pack", 17f, true, 24))
+        val packs = IconPacks.list(packageManager)
+        val cur = Prefs.iconPack(this)
+        val pg = RadioGroup(this)
+        val rb0 = RadioButton(this)
+        rb0.id = 5000
+        rb0.text = "Bawaan sistem"
+        rb0.setTextColor(Color.WHITE)
+        rb0.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+        pg.addView(rb0)
+        packs.forEachIndexed { i, p ->
+            val rb = RadioButton(this)
+            rb.id = 5001 + i
+            rb.text = p.label
+            rb.setTextColor(Color.WHITE)
+            rb.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            pg.addView(rb)
+        }
+        val idx = packs.indexOfFirst { it.pkg == cur }
+        pg.check(if (idx >= 0) 5001 + idx else 5000)
+        pg.setOnCheckedChangeListener { _, id ->
+            Prefs.setIconPack(this, if (id == 5000) "" else packs[id - 5001].pkg)
+        }
+        box.addView(pg)
+        box.addView(
+            tv(
+                if (packs.isEmpty()) {
+                    "Belum ada icon pack terpasang. Pasang icon pack (format Nova/ADW/Apex) dari Play Store atau F-Droid, lalu balik ke sini."
+                } else {
+                    "App yang nggak ada di icon pack tetap pakai ikon bawaan."
+                },
+                12f, false, 0, 0xFF9E9E9E.toInt()
+            )
+        )
 
         box.addView(tv("Animasi", 17f, true, 24))
         seek(box, "Kecepatan animasi", "%", 50, 200, 10, Prefs.animSpeed(this)) { Prefs.setAnimSpeed(this, it) }
