@@ -37,6 +37,12 @@ object Prefs {
     fun pages(c: Context) = sp(c).getInt("pages", 2)
     fun setPages(c: Context, v: Int) = sp(c).edit().putInt("pages", v).apply()
 
+    fun hAlign(c: Context) = sp(c).getInt("hAlign", 0)
+    fun setHAlign(c: Context, v: Int) = sp(c).edit().putInt("hAlign", v).apply()
+
+    fun vAlign(c: Context) = sp(c).getInt("vAlign", 0)
+    fun setVAlign(c: Context, v: Int) = sp(c).edit().putInt("vAlign", v).apply()
+
     fun iconScale(c: Context) = sp(c).getInt("iconScale", 100)
     fun setIconScale(c: Context, v: Int) = sp(c).edit().putInt("iconScale", v).apply()
 
