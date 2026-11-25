@@ -1,10 +1,13 @@
 package com.example.simplelauncher
 
 import android.content.Context
+import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.text.TextUtils
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.View
+import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -67,80 +70,133 @@ class BigAppView(
     }
 }
 
-/** Folder di home: kartu transparan berisi preview ikon + nama folder. */
+/**
+ * Folder di home: kartu transparan berisi ikon (ngisi penuh), nama di bawah kartu.
+ * Kalau label disembunyiin di setelan, nama folder ilang dan kartu ngisi penuh.
+ * Kalau app lebih banyak dari slot, slot terakhir jadi grup mini 2x2.
+ */
 class FolderView(
     ctx: Context,
-    name: String,
-    apps: List<App>,
-    spanW: Int,
-    spanH: Int,
-    cardColor: Int,
-    textColor: Int
+    private val name: String,
+    private val apps: List<App>,
+    private val spanW: Int,
+    private val spanH: Int,
+    private val cardColor: Int,
+    private val textColor: Int
 ) : LinearLayout(ctx) {
 
-    private val pc: Int = when {
-        spanW >= 2 && spanH >= 2 -> 3
-        spanW >= 2 -> 4
-        else -> 2
-    }
-    private val pr: Int = when {
-        spanW >= 2 && spanH >= 2 -> 3
-        spanW >= 2 -> 1
-        spanH >= 2 -> 3
-        else -> 2
-    }
-    private val previews = ArrayList<ImageView>()
-    private val label = TextView(ctx)
+    private var built = false
+    private val showLabel = Prefs.showLabels(ctx)
 
     init {
         orientation = VERTICAL
-        gravity = Gravity.CENTER
-        background = GradientDrawable().apply {
-            setColor(cardColor)
-            cornerRadius = ctx.dp(28).toFloat()
-        }
-        for (r in 0 until pr) {
-            val row = LinearLayout(ctx)
-            row.orientation = HORIZONTAL
-            for (c in 0 until pc) {
-                val iv = ImageView(ctx)
-                iv.outlineProvider = roundOutline(0.26f)
-                iv.clipToOutline = true
-                val a = apps.getOrNull(r * pc + c)
-                if (a != null) iv.setImageDrawable(a.iconCopy())
-                val lp = LayoutParams(ctx.dp(30), ctx.dp(30))
-                lp.setMargins(ctx.dp(2), ctx.dp(2), ctx.dp(2), ctx.dp(2))
-                row.addView(iv, lp)
-                previews.add(iv)
-            }
-            addView(row, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
-        }
-        label.text = name
-        label.setTextColor(textColor)
-        label.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-        label.maxLines = 1
-        label.ellipsize = TextUtils.TruncateAt.END
-        label.gravity = Gravity.CENTER
-        val llp = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT)
-        llp.topMargin = ctx.dp(2)
-        llp.marginStart = ctx.dp(6)
-        llp.marginEnd = ctx.dp(6)
-        addView(label, llp)
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         val w = MeasureSpec.getSize(widthMeasureSpec)
         val h = MeasureSpec.getSize(heightMeasureSpec)
-        if (w > 0 && h > 0) {
-            val pad = context.dp(8)
-            val labelH = context.dp(22)
-            val s = minOf((w - 2 * pad) / pc, (h - 2 * pad - labelH) / pr) - context.dp(4)
-            val size = maxOf(s, context.dp(16))
-            for (iv in previews) {
-                iv.layoutParams.width = size
-                iv.layoutParams.height = size
-            }
+        if (!built && w > 0 && h > 0) {
+            built = true
+            build(w, h)
         }
         super.onMeasure(widthMeasureSpec, heightMeasureSpec)
+    }
+
+    private fun iconView(a: App, size: Int): ImageView {
+        val iv = ImageView(context)
+        iv.outlineProvider = roundOutline(0.26f)
+        iv.clipToOutline = true
+        iv.setImageDrawable(a.iconCopy())
+        iv.layoutParams = FrameLayout.LayoutParams(size, size, Gravity.CENTER)
+        return iv
+    }
+
+    private fun miniGroup(rest: List<App>, size: Int): View {
+        val ctx = context
+        val g = LinearLayout(ctx)
+        g.orientation = VERTICAL
+        g.gravity = Gravity.CENTER
+        g.background = GradientDrawable().apply {
+            setColor(if (textColor == Color.WHITE) 0x33FFFFFF else 0x22000000)
+            cornerRadius = size * 0.26f
+        }
+        val s = (size * 0.40f).toInt().coerceAtLeast(ctx.dp(8))
+        for (r in 0..1) {
+            val row = LinearLayout(ctx)
+            row.orientation = HORIZONTAL
+            for (c in 0..1) {
+                val a = rest.getOrNull(r * 2 + c)
+                val iv = ImageView(ctx)
+                iv.outlineProvider = roundOutline(0.26f)
+                iv.clipToOutline = true
+                if (a != null) iv.setImageDrawable(a.iconCopy())
+                row.addView(iv, LayoutParams(s, s))
+            }
+            g.addView(row)
+        }
+        g.layoutParams = FrameLayout.LayoutParams(size, size, Gravity.CENTER)
+        return g
+    }
+
+    private fun build(w: Int, h: Int) {
+        val ctx = context
+        val labelH = if (showLabel) minOf(ctx.dp(22), h / 4) else 0
+        val boxH = h - labelH
+        val pad = ctx.dp(8)
+        val aspect = w.toFloat() / boxH
+
+        val grid: Pair<Int, Int> = when {
+            spanW >= 2 && spanH >= 2 -> if (aspect > 1.15f) 4 to 3 else 3 to 3
+            spanW >= 2 -> 4 to 1
+            spanH >= 2 -> 2 to 3
+            else -> 2 to 2
+        }
+        val pc = grid.first
+        val pr = grid.second
+        val cellW = (w - 2 * pad) / pc
+        val cellH = (boxH - 2 * pad) / pr
+        val iconSz = (minOf(cellW, cellH) * 0.84f).toInt().coerceAtLeast(ctx.dp(16))
+
+        val slots = pc * pr
+        val overflow = apps.size > slots
+        val shown = if (overflow) apps.take(slots - 1) else apps
+        val rest = if (overflow) apps.drop(slots - 1) else emptyList()
+
+        val box = LinearLayout(ctx)
+        box.orientation = VERTICAL
+        box.background = GradientDrawable().apply {
+            setColor(cardColor)
+            cornerRadius = ctx.dp(26).toFloat()
+        }
+        box.setPadding(pad, pad, pad, pad)
+
+        for (r in 0 until pr) {
+            val row = LinearLayout(ctx)
+            row.orientation = HORIZONTAL
+            for (c in 0 until pc) {
+                val cell = FrameLayout(ctx)
+                val i = r * pc + c
+                if (i < shown.size) {
+                    cell.addView(iconView(shown[i], iconSz))
+                } else if (overflow && i == slots - 1) {
+                    cell.addView(miniGroup(rest, iconSz))
+                }
+                row.addView(cell, LayoutParams(0, LayoutParams.MATCH_PARENT, 1f))
+            }
+            box.addView(row, LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f))
+        }
+        addView(box, LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f))
+
+        if (showLabel) {
+            val label = TextView(ctx)
+            label.text = name
+            label.setTextColor(textColor)
+            label.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            label.maxLines = 1
+            label.ellipsize = TextUtils.TruncateAt.END
+            label.gravity = Gravity.CENTER
+            if (textColor == Color.WHITE) label.setShadowLayer(4f, 0f, 1f, 0x99000000.toInt())
+            addView(label, LayoutParams(LayoutParams.MATCH_PARENT, labelH))
+        }
     }
 }
