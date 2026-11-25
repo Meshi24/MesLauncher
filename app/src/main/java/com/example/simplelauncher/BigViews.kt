@@ -101,8 +101,8 @@ class BigAppView(
 }
 
 /**
- * Folder di home: kartu transparan yang nempel ke isinya, nama di bawah kartu.
- * Ukuran ikon ngikutin setelan ukuran ikon. Kalau label disembunyiin, nama ilang.
+ * Folder di home: kartu transparan ngisi penuh, nama di bawah kartu.
+ * Kalau label disembunyiin di setelan, nama folder ilang dan kartu ngisi penuh.
  * Kalau app lebih banyak dari slot, slot terakhir jadi grup mini 2x2.
  */
 class FolderView(
@@ -120,7 +120,6 @@ class FolderView(
 
     init {
         orientation = VERTICAL
-        gravity = Gravity.CENTER
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
@@ -172,9 +171,9 @@ class FolderView(
     private fun build(w: Int, h: Int) {
         val ctx = context
         val labelH = if (showLabel) minOf(ctx.dp(22), h / 4) else 0
-        val areaH = h - labelH
+        val boxH = h - labelH
         val pad = ctx.dp(8)
-        val aspect = w.toFloat() / areaH
+        val aspect = w.toFloat() / boxH
 
         val grid: Pair<Int, Int> = when {
             spanW >= 2 && spanH >= 2 -> if (aspect > 1.15f) 4 to 3 else 3 to 3
@@ -184,26 +183,14 @@ class FolderView(
         }
         val pc = grid.first
         val pr = grid.second
-
-        val cell = minOf((w - 2 * pad) / pc, (areaH - 2 * pad) / pr).coerceAtLeast(ctx.dp(16))
-        val scale = Prefs.iconScale(ctx) / 100f
-        val iconSz = (cell * 0.82f * scale)
-            .coerceAtMost((cell - ctx.dp(4)).toFloat())
-            .coerceAtLeast(ctx.dp(12).toFloat())
-            .toInt()
-        val cellSz = minOf(cell, (iconSz / 0.82f).toInt()).coerceAtLeast(iconSz)
+        val cellW = (w - 2 * pad) / pc
+        val cellH = (boxH - 2 * pad) / pr
+        val iconSz = (minOf(cellW, cellH) * 0.84f).toInt().coerceAtLeast(ctx.dp(16))
 
         val slots = pc * pr
         val overflow = apps.size > slots
         val shown = if (overflow) apps.take(slots - 1) else apps
         val rest = if (overflow) apps.drop(slots - 1) else emptyList()
-
-        val used = (if (overflow) slots else apps.size).coerceAtLeast(1)
-        val rowsUsed = (used + pc - 1) / pc
-        val colsUsed = if (rowsUsed == 1) used else pc
-
-        val boxW = colsUsed * cellSz + 2 * pad
-        val boxH = rowsUsed * cellSz + 2 * pad
 
         val box = LinearLayout(ctx)
         box.orientation = VERTICAL
@@ -213,25 +200,22 @@ class FolderView(
         }
         box.setPadding(pad, pad, pad, pad)
 
-        for (r in 0 until rowsUsed) {
+        for (r in 0 until pr) {
             val row = LinearLayout(ctx)
             row.orientation = HORIZONTAL
-            for (c in 0 until colsUsed) {
+            for (c in 0 until pc) {
+                val cell = FrameLayout(ctx)
                 val i = r * pc + c
-                if (i >= used) break
-                val cellView = FrameLayout(ctx)
                 if (i < shown.size) {
-                    cellView.addView(iconView(shown[i], iconSz))
+                    cell.addView(iconView(shown[i], iconSz))
                 } else if (overflow && i == slots - 1) {
-                    cellView.addView(miniGroup(rest, iconSz))
+                    cell.addView(miniGroup(rest, iconSz))
                 }
-                row.addView(cellView, LayoutParams(cellSz, cellSz))
+                row.addView(cell, LayoutParams(0, LayoutParams.MATCH_PARENT, 1f))
             }
-            box.addView(row, LayoutParams(LayoutParams.WRAP_CONTENT, cellSz))
+            box.addView(row, LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f))
         }
-        val blp = LayoutParams(boxW, boxH)
-        blp.gravity = Gravity.CENTER_HORIZONTAL
-        addView(box, blp)
+        addView(box, LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f))
 
         if (showLabel) {
             val label = TextView(ctx)
