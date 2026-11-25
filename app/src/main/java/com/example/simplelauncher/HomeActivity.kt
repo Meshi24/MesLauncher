@@ -4,6 +4,10 @@ import android.app.Activity
 import android.app.ActivityOptions
 import android.app.AlertDialog
 import android.app.KeyguardManager
+import android.appwidget.AppWidgetHost
+import android.appwidget.AppWidgetHostView
+import android.appwidget.AppWidgetManager
+import android.appwidget.AppWidgetProviderInfo
 import android.content.ActivityNotFoundException
 import android.content.BroadcastReceiver
 import android.content.ComponentName
@@ -11,11 +15,13 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
+import android.provider.AlarmClock
 import android.provider.Settings
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
@@ -30,6 +36,7 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.content.ContextCompat
@@ -41,6 +48,7 @@ import androidx.core.widget.doAfterTextChanged
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import kotlin.math.ceil
 
 class HomeActivity : Activity() {
 
@@ -48,9 +56,14 @@ class HomeActivity : Activity() {
     private val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
     private val sizes = listOf(1 to 1, 2 to 1, 1 to 2, 2 to 2)
 
+    private val HOST_ID = 4242
+    private val REQ_BIND = 71
+    private val REQ_CONFIG = 72
+
     private class Pick(val keys: List<String>, val fromHome: Boolean, val menu: () -> Unit)
 
     private var allApps: List<App> = emptyList()
+    private var loadedPack = ""
 
     private lateinit var root: DragFrame
     private lateinit var homeLayer: FrameLayout
@@ -63,6 +76,15 @@ class HomeActivity : Activity() {
     private lateinit var drawerLayer: FrameLayout
     private lateinit var searchBox: EditText
     private lateinit var drawerContent: FrameLayout
+
+    // widget
+    private lateinit var awm: AppWidgetManager
+    private lateinit var host: AppWidgetHost
+    private val widgetViews = HashMap<Int, AppWidgetHostView>()
+    private val stackIndex = HashMap<String, Int>()
+    private var pendWidgetId = -1
+    private var pendProvider: AppWidgetProviderInfo? = null
+    private var pendStackKey: String? = null
 
     private var insTop = 0
     private var insBottom = 0
@@ -153,6 +175,9 @@ class HomeActivity : Activity() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         window.isNavigationBarContrastEnforced = false
 
+        awm = AppWidgetManager.getInstance(this)
+        host = AppWidgetHost(this, HOST_ID)
+
         root = DragFrame(this)
         setupGestures()
         buildHome()
@@ -161,6 +186,8 @@ class HomeActivity : Activity() {
         root.addView(drawerLayer, FrameLayout.LayoutParams(MATCH, MATCH))
         setContentView(root)
         applyInsets()
+
+        pager.lockCheck = { x, y -> stackAt(x, y) }
 
         ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
             val b = insets.getInsets(WindowInsetsCompat.Type.systemBars())
@@ -182,6 +209,22 @@ class HomeActivity : Activity() {
             ContextCompat.RECEIVER_EXPORTED
         )
         loadApps()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        try {
+            host.startListening()
+        } catch (e: Exception) {
+        }
+    }
+
+    override fun onStop() {
+        try {
+            host.stopListening()
+        } catch (e: Exception) {
+        }
+        super.onStop()
     }
 
     override fun onDestroy() {
@@ -264,13 +307,29 @@ class HomeActivity : Activity() {
         drawerLayer.addView(drawerContent, FrameLayout.LayoutParams(MATCH, MATCH))
     }
 
+    /** Dock ngikut ukuran ikon: makin gede ikon, makin tinggi dock. */
+    private fun dockHeight(): Int {
+        val s = Prefs.iconScale(this) / 100f
+        return (dp(84) * s).toInt().coerceIn(dp(60), dp(140))
+    }
+
+    private fun updateDockSize() {
+        val h = dockHeight()
+        val dlp = dockBar.layoutParams
+        if (dlp.height != h) {
+            dlp.height = h
+            dockBar.layoutParams = dlp
+        }
+        lp(pager).bottomMargin = insBottom + h + dp(76)
+        pager.requestLayout()
+    }
+
     private fun applyInsets() {
         lp(pager).topMargin = insTop + dp(8)
-        lp(pager).bottomMargin = insBottom + dp(160)
+        updateDockSize()
         bottomBar.setPadding(dp(12), 0, dp(12), insBottom + dp(10))
         lp(searchBox).topMargin = insTop + dp(12)
         lp(drawerContent).topMargin = insTop + dp(68)
-        pager.requestLayout()
         bottomBar.requestLayout()
         searchBox.requestLayout()
         drawerContent.requestLayout()
@@ -280,26 +339,107 @@ class HomeActivity : Activity() {
     // ------------------------------------------------------------ data load
 
     private fun loadApps() {
+        val packName = Prefs.iconPack(this)
+        loadedPack = packName
         Thread {
             val pm = packageManager
+            val pack = IconPacks.load(this, packName)
             val q = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
             val list = pm.queryIntentActivities(q, 0)
                 .filter { it.activityInfo.packageName != packageName }
                 .map {
+                    val pkg = it.activityInfo.packageName
+                    val cls = it.activityInfo.name
+                    val ic = pack?.icon(pkg, cls) ?: it.loadIcon(pm)
                     App(
                         it.loadLabel(pm).toString(),
-                        it.activityInfo.packageName,
-                        it.activityInfo.name,
-                        it.loadIcon(pm),
+                        pkg,
+                        cls,
+                        ic,
                         it.activityInfo.applicationInfo.category
                     )
                 }
                 .sortedWith(compareBy<App>({ letterOf(it.label) == "#" }, { it.label.lowercase() }))
             runOnUiThread {
                 allApps = list
+                maybeSeed()
                 applySettings()
             }
         }.start()
+    }
+
+    // -------------------------------------------------------- app bawaan
+
+    private fun resolvePkg(i: Intent): String? = try {
+        val ri = packageManager.resolveActivity(i, PackageManager.MATCH_DEFAULT_ONLY)
+        val p = ri?.activityInfo?.packageName
+        if (p == null || p == "android") null else p
+    } catch (e: Exception) {
+        null
+    }
+
+    private fun mainCat(c: String): Intent = Intent.makeMainSelectorActivity(Intent.ACTION_MAIN, c)
+
+    private fun appFor(i: Intent): App? {
+        val p = resolvePkg(i) ?: return null
+        return allApps.firstOrNull { it.pkg == p }
+    }
+
+    private fun maybeSeed() {
+        if (Prefs.seeded(this)) return
+        if (Prefs.home(this).isEmpty() && Prefs.dock(this).isEmpty()) seedDefaults()
+        Prefs.setSeeded(this, true)
+    }
+
+    private fun seedDefaults() {
+        if (allApps.isEmpty()) return
+        ensureGrids()
+
+        if (Prefs.dock(this).isEmpty()) {
+            val dockIntents = listOf(
+                Intent(Intent.ACTION_DIAL),
+                Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:")),
+                Intent(Intent.ACTION_VIEW, Uri.parse("https://example.com")),
+                Intent("android.media.action.IMAGE_CAPTURE")
+            )
+            val d = ArrayList<String>()
+            for (i in dockIntents) {
+                val a = appFor(i) ?: continue
+                if (!d.contains(a.key)) d.add(a.key)
+            }
+            Prefs.saveDock(this, d.take(4))
+        }
+
+        val homeIntents = listOf(
+            mainCat(Intent.CATEGORY_APP_GALLERY),
+            mainCat(Intent.CATEGORY_APP_CALCULATOR),
+            mainCat(Intent.CATEGORY_APP_CALENDAR),
+            mainCat(Intent.CATEGORY_APP_CONTACTS),
+            mainCat(Intent.CATEGORY_APP_MAPS),
+            mainCat(Intent.CATEGORY_APP_MUSIC),
+            mainCat(Intent.CATEGORY_APP_EMAIL),
+            mainCat(Intent.CATEGORY_APP_MARKET),
+            Intent(Settings.ACTION_SETTINGS),
+            Intent(AlarmClock.ACTION_SHOW_ALARMS)
+        )
+        val candidates = ArrayList<App>()
+        for (i in homeIntents) {
+            val a = appFor(i)
+            if (a != null) candidates.add(a)
+        }
+        val yt = allApps.firstOrNull { it.pkg == "com.google.android.youtube" }
+        if (yt != null) candidates.add(yt)
+
+        val cols = Prefs.cols(this)
+        val rows = Prefs.rows(this)
+        val cur = ArrayList(Prefs.home(this))
+        val dockKeys = Prefs.dock(this)
+        for (a in candidates) {
+            if (cur.any { it.key == a.key } || dockKeys.contains(a.key)) continue
+            val spot = findFree(cur, 0, 0, 0, 1, 1, cols, rows) ?: break
+            cur.add(Placed(a.key, spot[1], spot[2], 1, 1, spot[0]))
+        }
+        Prefs.saveHome(this, cur)
     }
 
     // -------------------------------------------------------- render: home
@@ -312,6 +452,7 @@ class HomeActivity : Activity() {
 
     private fun applySettings() {
         lightWp = wallpaperIsLight(this)
+        updateDockSize()
         renderHome()
         renderDock()
         val light = dockLight()
@@ -367,7 +508,6 @@ class HomeActivity : Activity() {
         cornerRadius = dp(20).toFloat()
     }
 
-    /** Kasih tag key ke view, dan tampilan "terpilih" kalau lagi mode pilih beberapa. */
     private fun decorate(v: View, key: String) {
         v.tag = key
         if (!selecting) {
@@ -413,6 +553,23 @@ class HomeActivity : Activity() {
                 if (p.col >= cols || p.row >= rows) continue
                 val w = minOf(p.w, cols - p.col)
                 val h = minOf(p.h, rows - p.row)
+
+                if (p.key.startsWith("w:")) {
+                    val views = ArrayList<View>()
+                    for (id in widgetIds(p.key)) {
+                        val hv = widgetView(id)
+                        if (hv != null) views.add(hv)
+                    }
+                    if (views.isEmpty()) continue
+                    val st = StackView(this)
+                    st.setViews(views, stackIndex[p.key] ?: 0)
+                    st.onIndexChanged = { stackIndex[p.key] = it }
+                    st.layoutParams = HomeGrid.LP(p.col, p.row, w, h)
+                    st.onLong = { homeLongPress(p.key) { widgetMenu(p.key) } }
+                    decorate(st, p.key)
+                    g.addView(st)
+                    continue
+                }
 
                 if (p.key.startsWith("folder:")) {
                     val f = folders.firstOrNull { "folder:" + it.id == p.key } ?: continue
@@ -475,6 +632,7 @@ class HomeActivity : Activity() {
             dp(30).toFloat()
         )
         dockBar.removeAllViews()
+        val scale = Prefs.iconScale(this) / 100f
         val apps = Prefs.dock(this).mapNotNull { k -> allApps.firstOrNull { it.key == k } }
         if (apps.isEmpty()) {
             val h = TextView(this)
@@ -486,7 +644,7 @@ class HomeActivity : Activity() {
             return
         }
         for (a in apps) {
-            val cell = HomeIcon(this, Color.WHITE, false, 1f, 11f)
+            val cell = HomeIcon(this, Color.WHITE, false, scale, 11f)
             cell.bind(a)
             cell.setOnClickListener { launchApp(a, cell.icon) }
             cell.setOnLongClickListener { dockMenu(a); true }
@@ -541,6 +699,255 @@ class HomeActivity : Activity() {
         root.postDelayed({
             if (scattered && !paused) playGather()
         }, 1500)
+    }
+
+    // ------------------------------------------------------------- widget
+
+    private fun widgetIds(key: String): List<Int> =
+        key.removePrefix("w:").split(",").mapNotNull { it.trim().toIntOrNull() }
+
+    private fun widgetView(id: Int): AppWidgetHostView? {
+        val cached = widgetViews[id]
+        if (cached != null) return cached
+        val info = awm.getAppWidgetInfo(id) ?: return null
+        return try {
+            val hv = host.createView(this, id, info)
+            widgetViews[id] = hv
+            hv
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun deleteWidgetIds(key: String) {
+        for (id in widgetIds(key)) {
+            try {
+                host.deleteAppWidgetId(id)
+            } catch (e: Exception) {
+            }
+            widgetViews.remove(id)
+        }
+        stackIndex.remove(key)
+    }
+
+    private fun stackAt(x: Float, y: Float): Boolean {
+        val g = grids.getOrNull(pager.currentPage()) ?: return false
+        val loc = IntArray(2)
+        for (i in 0 until g.childCount) {
+            val v = g.getChildAt(i)
+            if (v is StackView && v.count() > 1) {
+                v.getLocationOnScreen(loc)
+                if (x >= loc[0] && x <= loc[0] + v.width && y >= loc[1] && y <= loc[1] + v.height) {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    private fun appLabelOf(pkg: String): String = try {
+        packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
+    } catch (e: Exception) {
+        pkg.substringAfterLast('.')
+    }
+
+    private fun pickWidget(addTo: String?) {
+        val ps = awm.installedProviders
+            .filter { it.widgetCategory and AppWidgetProviderInfo.WIDGET_CATEGORY_HOME_SCREEN != 0 }
+            .sortedBy { appLabelOf(it.provider.packageName).lowercase() + it.loadLabel(packageManager).lowercase() }
+        if (ps.isEmpty()) {
+            Toast.makeText(this, "Nggak ada widget yang ketemu", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val labels = ps.map { it.loadLabel(packageManager) + "  (" + appLabelOf(it.provider.packageName) + ")" }
+        AlertDialog.Builder(this).setTitle("Pilih widget")
+            .setItems(labels.toTypedArray()) { _, i -> startWidgetBind(ps[i], addTo) }
+            .showT()
+    }
+
+    private fun startWidgetBind(p: AppWidgetProviderInfo, addTo: String?) {
+        val id = host.allocateAppWidgetId()
+        pendWidgetId = id
+        pendProvider = p
+        pendStackKey = addTo
+        if (awm.bindAppWidgetIdIfAllowed(id, p.provider)) {
+            afterBind()
+        } else {
+            val i = Intent(AppWidgetManager.ACTION_APPWIDGET_BIND)
+            i.putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, id)
+            i.putExtra(AppWidgetManager.EXTRA_APPWIDGET_PROVIDER, p.provider)
+            try {
+                startActivityForResult(i, REQ_BIND)
+            } catch (e: Exception) {
+                cancelPendingWidget()
+            }
+        }
+    }
+
+    private fun afterBind() {
+        val p = pendProvider ?: return
+        if (p.configure != null) {
+            try {
+                host.startAppWidgetConfigureActivityForResult(this, pendWidgetId, 0, REQ_CONFIG, null)
+            } catch (e: Exception) {
+                finishWidget()
+            }
+        } else {
+            finishWidget()
+        }
+    }
+
+    private fun cancelPendingWidget() {
+        if (pendWidgetId >= 0) {
+            try {
+                host.deleteAppWidgetId(pendWidgetId)
+            } catch (e: Exception) {
+            }
+        }
+        pendWidgetId = -1
+        pendProvider = null
+        pendStackKey = null
+    }
+
+    private fun defaultSpan(p: AppWidgetProviderInfo): Pair<Int, Int> {
+        val dm = resources.displayMetrics
+        val cols = Prefs.cols(this)
+        val rows = Prefs.rows(this)
+        val gw = if (pager.width > 0) pager.width else dm.widthPixels
+        val gh = if (pager.height > 0) pager.height else (dm.heightPixels * 0.7f).toInt()
+        val cw = gw / cols.toFloat()
+        val ch = gh / rows.toFloat()
+        val w = ceil(maxOf(p.minWidth, 1) / cw).toInt().coerceIn(1, cols)
+        val h = ceil(maxOf(p.minHeight, 1) / ch).toInt().coerceIn(1, rows)
+        return Pair(w, h)
+    }
+
+    private fun finishWidget() {
+        val id = pendWidgetId
+        val p = pendProvider
+        val addTo = pendStackKey
+        pendWidgetId = -1
+        pendProvider = null
+        pendStackKey = null
+        if (id < 0 || p == null) return
+
+        if (addTo != null) {
+            val cur = Prefs.home(this)
+            if (cur.none { it.key == addTo }) {
+                try {
+                    host.deleteAppWidgetId(id)
+                } catch (e: Exception) {
+                }
+                return
+            }
+            val nk = "$addTo,$id"
+            stackIndex.remove(addTo)
+            Prefs.saveHome(this, cur.map { if (it.key == addTo) it.copy(key = nk) else it })
+            stackIndex[nk] = widgetIds(nk).size - 1
+            renderHome()
+            Toast.makeText(this, "Widget masuk tumpukan. Geser kiri/kanan buat ganti", Toast.LENGTH_LONG).show()
+            return
+        }
+        val span = defaultSpan(p)
+        startPlace("w:$id", span.first, span.second)
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQ_BIND) {
+            if (resultCode == RESULT_OK) afterBind() else cancelPendingWidget()
+        } else if (requestCode == REQ_CONFIG) {
+            if (resultCode == RESULT_OK) finishWidget() else cancelPendingWidget()
+        }
+    }
+
+    private fun widgetMenu(key: String) {
+        val ids = widgetIds(key)
+        val labels = ArrayList<String>()
+        labels.add("Ubah ukuran")
+        labels.add("Tambah widget ke tumpukan")
+        if (ids.size > 1) labels.add("Hapus widget yang lagi tampil")
+        labels.add("Pilih beberapa")
+        labels.add("Hapus")
+        AlertDialog.Builder(this)
+            .setTitle(if (ids.size > 1) "Tumpukan widget (" + ids.size + ")" else "Widget")
+            .setItems(labels.toTypedArray()) { _, which ->
+                when (labels[which]) {
+                    "Ubah ukuran" -> resizeDialog(key)
+                    "Tambah widget ke tumpukan" -> pickWidget(key)
+                    "Hapus widget yang lagi tampil" -> removeCurrentFromStack(key)
+                    "Pilih beberapa" -> enterSelection(key)
+                    "Hapus" -> {
+                        deleteWidgetIds(key)
+                        Prefs.saveHome(this, Prefs.home(this).filter { it.key != key })
+                        renderHome()
+                    }
+                    else -> {}
+                }
+            }.showT()
+    }
+
+    private fun removeCurrentFromStack(key: String) {
+        val ids = widgetIds(key).toMutableList()
+        if (ids.size < 2) return
+        val i = (stackIndex[key] ?: 0).coerceIn(0, ids.size - 1)
+        val gone = ids.removeAt(i)
+        try {
+            host.deleteAppWidgetId(gone)
+        } catch (e: Exception) {
+        }
+        widgetViews.remove(gone)
+        val nk = "w:" + ids.joinToString(",")
+        stackIndex.remove(key)
+        Prefs.saveHome(this, Prefs.home(this).map { if (it.key == key) it.copy(key = nk) else it })
+        renderHome()
+    }
+
+    private fun resizeDialog(key: String) {
+        val item = Prefs.home(this).firstOrNull { it.key == key } ?: return
+        val cols = Prefs.cols(this)
+        val rows = Prefs.rows(this)
+        var nw = item.w.coerceIn(1, cols)
+        var nh = item.h.coerceIn(1, rows)
+
+        val box = LinearLayout(this)
+        box.orientation = LinearLayout.VERTICAL
+        box.setPadding(dp(20), dp(12), dp(20), dp(4))
+        val tw = TextView(this)
+        val th = TextView(this)
+        tw.text = "Lebar: $nw kotak"
+        th.text = "Tinggi: $nh kotak"
+        val sw = SeekBar(this)
+        sw.max = maxOf(cols - 1, 0)
+        sw.progress = nw - 1
+        val sh = SeekBar(this)
+        sh.max = maxOf(rows - 1, 0)
+        sh.progress = nh - 1
+        sw.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(s: SeekBar?, p: Int, u: Boolean) {
+                nw = p + 1
+                tw.text = "Lebar: $nw kotak"
+            }
+            override fun onStartTrackingTouch(s: SeekBar?) {}
+            override fun onStopTrackingTouch(s: SeekBar?) {}
+        })
+        sh.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(s: SeekBar?, p: Int, u: Boolean) {
+                nh = p + 1
+                th.text = "Tinggi: $nh kotak"
+            }
+            override fun onStartTrackingTouch(s: SeekBar?) {}
+            override fun onStopTrackingTouch(s: SeekBar?) {}
+        })
+        box.addView(tw)
+        box.addView(sw)
+        box.addView(th)
+        box.addView(sh)
+        AlertDialog.Builder(this).setTitle("Ubah ukuran").setView(box)
+            .setPositiveButton("Terapkan") { _, _ -> resizeItem(key, nw, nh) }
+            .setNegativeButton("Batal", null)
+            .showT()
     }
 
     // ------------------------------------------------------- home actions
@@ -600,6 +1007,8 @@ class HomeActivity : Activity() {
         } else if (k != null && k.startsWith("folder:")) {
             val id = k.removePrefix("folder:")
             Prefs.saveFolders(this, Prefs.folders(this).filter { it.id != id })
+        } else if (k != null && k.startsWith("w:")) {
+            deleteWidgetIds(k)
         }
         endMove()
         renderHome()
@@ -681,11 +1090,23 @@ class HomeActivity : Activity() {
 
     private fun showHomeMenu() {
         AlertDialog.Builder(this)
-            .setItems(arrayOf("Buat folder", "Setelan launcher", "Ganti wallpaper")) { _, which ->
+            .setItems(
+                arrayOf(
+                    "Tambah widget", "Buat folder", "Isi app bawaan",
+                    "Setelan launcher", "Ganti wallpaper"
+                )
+            ) { _, which ->
                 when (which) {
-                    0 -> createFolder()
-                    1 -> startActivity(Intent(this, SettingsActivity::class.java))
+                    0 -> pickWidget(null)
+                    1 -> createFolder()
                     2 -> {
+                        seedDefaults()
+                        renderHome()
+                        renderDock()
+                        Toast.makeText(this, "App bawaan dipasang", Toast.LENGTH_SHORT).show()
+                    }
+                    3 -> startActivity(Intent(this, SettingsActivity::class.java))
+                    4 -> {
                         try {
                             startActivity(
                                 Intent.createChooser(
@@ -807,6 +1228,9 @@ class HomeActivity : Activity() {
 
     private fun deleteSelected() {
         val ks = selected.toSet()
+        for (k in ks) {
+            if (k.startsWith("w:")) deleteWidgetIds(k)
+        }
         Prefs.saveHome(this, Prefs.home(this).filter { !ks.contains(it.key) })
         exitSelection()
         renderHome()
@@ -1583,6 +2007,8 @@ class HomeActivity : Activity() {
         focusLost = false
         val animate = !firstResume
         firstResume = false
+
+        if (Prefs.iconPack(this) != loadedPack) loadApps()
 
         if (drawerOpen) closeDrawer(false)
         homeLayer.animate().cancel()
