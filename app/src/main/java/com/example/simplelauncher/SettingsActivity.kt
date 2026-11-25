@@ -39,6 +39,20 @@ class SettingsActivity : Activity() {
         seek(box, "Baris", "", 1, 10, 1, Prefs.rows(this)) { Prefs.setRows(this, it) }
         seek(box, "Jumlah halaman", "", 1, 10, 1, Prefs.pages(this)) { Prefs.setPages(this, it) }
 
+        box.addView(tv("Posisi grid di home", 17f, true, 24))
+        box.addView(tv("Rapatkan ke (horizontal)", 14f, false, 0, 0xFF9E9E9E.toInt()))
+        box.addView(
+            radios(3000, listOf("Penuh (melebar)", "Kiri", "Tengah", "Kanan"), Prefs.hAlign(this)) {
+                Prefs.setHAlign(this, it)
+            }
+        )
+        box.addView(tv("Rapatkan ke (vertikal)", 14f, false, 8, 0xFF9E9E9E.toInt()))
+        box.addView(
+            radios(4000, listOf("Penuh (memanjang)", "Atas", "Tengah", "Bawah"), Prefs.vAlign(this)) {
+                Prefs.setVAlign(this, it)
+            }
+        )
+
         box.addView(tv("Ikon", 17f, true, 24))
         seek(box, "Ukuran ikon", "%", 60, 140, 5, Prefs.iconScale(this)) { Prefs.setIconScale(this, it) }
         seek(box, "Ukuran label", "%", 70, 140, 5, Prefs.labelScale(this)) { Prefs.setLabelScale(this, it) }
