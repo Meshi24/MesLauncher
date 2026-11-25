@@ -61,6 +61,12 @@ object Prefs {
     fun dockTint(c: Context) = sp(c).getInt("tint", 0)
     fun setDockTint(c: Context, v: Int) = sp(c).edit().putInt("tint", v).apply()
 
+    fun iconPack(c: Context): String = sp(c).getString("iconPack", "") ?: ""
+    fun setIconPack(c: Context, v: String) = sp(c).edit().putString("iconPack", v).apply()
+
+    fun seeded(c: Context) = sp(c).getBoolean("seeded", false)
+    fun setSeeded(c: Context, v: Boolean) = sp(c).edit().putBoolean("seeded", v).apply()
+
     fun home(c: Context): List<Placed> {
         val raw = sp(c).getString("home", "") ?: ""
         return raw.lines().mapNotNull { line ->
