@@ -18,6 +18,11 @@ class Pager(ctx: Context) : HorizontalScrollView(ctx) {
 
     private val strip = LinearLayout(ctx)
     var onPageChanged: ((Int) -> Unit)? = null
+
+    /** Kalau ngembaliin true, sentuhan di titik itu nggak boleh diambil pager (mis. tumpukan widget). */
+    var lockCheck: ((Float, Float) -> Boolean)? = null
+    private var locked = false
+
     var page = 0
         private set
     private var count = 0
@@ -104,6 +109,18 @@ class Pager(ctx: Context) : HorizontalScrollView(ctx) {
             else -> cur.roundToInt()
         }
         goTo(target)
+    }
+
+    override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
+        val a = ev.actionMasked
+        if (a == MotionEvent.ACTION_DOWN) {
+            locked = lockCheck?.invoke(ev.rawX, ev.rawY) ?: false
+        }
+        if (locked) {
+            if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) locked = false
+            return false
+        }
+        return super.onInterceptTouchEvent(ev)
     }
 
     override fun onTouchEvent(ev: MotionEvent): Boolean {
